@@ -1,0 +1,231 @@
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.api.deps import require_authenticated_user
+from app.core.config import settings
+from app.core.logging import logger
+from app.db.database import get_db
+from app.db.models import User, LocationHistory, CircleMember, EntityState
+from app.schemas.api import ConfigResponse, EntityStateResponse, UnitSystem
+from app.services.state_service import StateService
+
+router = APIRouter()
+
+@router.get("/api/")
+async def api_root(user: User = Depends(require_authenticated_user)):
+    return {"message": "API running."}
+
+@router.get("/api/config", response_model=ConfigResponse)
+async def api_config(user: User = Depends(require_authenticated_user)) -> ConfigResponse:
+    # Build dynamically generated config responses
+    return ConfigResponse(
+        components=["api", "websocket", "mobile_app", "device_tracker", "sensor", "binary_sensor"],
+        config_dir="/config",
+        elevation=0,
+        latitude=0.0,
+        location_name="Home Assistant Compatible Server",
+        longitude=0.0,
+        time_zone="UTC",
+        unit_system=UnitSystem(
+            length="km",
+            mass="g",
+            pressure="Pa",
+            temperature="°C",
+            volume="L"
+        ),
+        version="2026.9.1",
+        whitelist_external_dirs=[]
+    )
+
+@router.get("/api/states", response_model=List[EntityStateResponse])
+async def api_get_states(
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+) -> List[EntityStateResponse]:
+    entities = await StateService.get_all_states(db, user.id)
+    return [
+        EntityStateResponse(
+            entity_id=e.entity_id,
+            state=e.state,
+            attributes=e.attributes,
+            last_changed=e.last_changed.isoformat(),
+            last_updated=e.last_updated.isoformat(),
+            context={"id": f"ctx_{e.entity_id}", "user_id": str(user.id)}
+        )
+        for e in entities
+    ]
+
+@router.get("/api/states/{entity_id}", response_model=EntityStateResponse)
+async def api_get_state(
+    entity_id: str,
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+) -> EntityStateResponse:
+    state_obj = await StateService.get_state(db, user.id, entity_id)
+    if not state_obj:
+        raise HTTPException(status_code=404, detail="Entity state not found.")
+    return EntityStateResponse(
+        entity_id=state_obj.entity_id,
+        state=state_obj.state,
+        attributes=state_obj.attributes,
+        last_changed=state_obj.last_changed.isoformat(),
+        last_updated=state_obj.last_updated.isoformat(),
+        context={"id": f"ctx_{state_obj.entity_id}", "user_id": str(user.id)}
+    )
+
+@router.post("/api/states/{entity_id}", response_model=EntityStateResponse)
+async def api_set_state(
+    entity_id: str,
+    payload: Dict[str, Any],
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+) -> EntityStateResponse:
+    state_val = payload.get("state")
+    if state_val is None:
+        raise HTTPException(status_code=400, detail="The 'state' field is required in the body payload.")
+    
+    attributes = payload.get("attributes", {})
+    
+    entity = await StateService.set_state(
+        db=db,
+        user_id=user.id,
+        entity_id=entity_id,
+        state=str(state_val),
+        attributes=attributes
+    )
+    
+    return EntityStateResponse(
+        entity_id=entity.entity_id,
+        state=entity.state,
+        attributes=entity.attributes,
+        last_changed=entity.last_changed.isoformat(),
+        last_updated=entity.last_updated.isoformat(),
+        context={"id": f"ctx_{entity.entity_id}", "user_id": str(user.id)}
+    )
+
+@router.get("/api/components")
+async def api_components(user: User = Depends(require_authenticated_user)):
+    return ["api", "websocket", "mobile_app", "device_tracker", "sensor", "binary_sensor"]
+
+@router.get("/api/services")
+async def api_services(user: User = Depends(require_authenticated_user)):
+    # Returns empty or basic capabilities to fulfill queries
+    return [
+        {
+            "domain": "device_tracker",
+            "services": {
+                "see": {
+                    "description": "Direct state updates",
+                    "fields": {}
+                }
+            }
+        }
+    ]
+
+@router.get("/api/events")
+async def api_events(user: User = Depends(require_authenticated_user)):
+    return [
+        {
+            "event": "state_changed",
+            "listener_count": 0
+        }
+    ]
+
+@router.get("/api/history/period")
+@router.get("/api/history/period/{timestamp}")
+async def api_get_history_period(
+    timestamp: Optional[str] = None,
+    user_id: Optional[int] = Query(None),
+    filter_entity_id: Optional[str] = Query(None),
+    hours: Optional[int] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+):
+    target_user_id = user_id if user_id is not None else user.id
+
+    # Verify authorization: current user can view their own history or members in a shared circle
+    if target_user_id != user.id:
+        stmt_user_circles = select(CircleMember.circle_id).where(CircleMember.user_id == user.id)
+        user_circle_ids = (await db.execute(stmt_user_circles)).scalars().all()
+
+        stmt_shared = select(CircleMember).where(
+            CircleMember.user_id == target_user_id,
+            CircleMember.circle_id.in_(user_circle_ids)
+        )
+        has_shared = (await db.execute(stmt_shared)).scalar_one_or_none()
+        if not has_shared:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to view this member's location history"
+            )
+
+    stmt = select(LocationHistory).where(LocationHistory.user_id == target_user_id)
+    if hours:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        stmt = stmt.where(LocationHistory.timestamp >= cutoff)
+    else:
+        if start_date:
+            try:
+                if "T" in start_date:
+                    start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+                else:
+                    start_dt = datetime.fromisoformat(f"{start_date}T00:00:00+00:00")
+                stmt = stmt.where(LocationHistory.timestamp >= start_dt)
+            except Exception:
+                pass
+        if end_date:
+            try:
+                if "T" in end_date:
+                    end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                else:
+                    end_dt = datetime.fromisoformat(f"{end_date}T23:59:59.999999+00:00")
+                stmt = stmt.where(LocationHistory.timestamp <= end_dt)
+            except Exception:
+                pass
+
+    stmt = stmt.order_by(LocationHistory.timestamp.desc()).limit(200)
+    res = await db.execute(stmt)
+    records = res.scalars().all()
+
+    if not records:
+        # Fallback to current device_tracker states if no recorded history entries yet
+        stmt_states = select(EntityState).where(
+            EntityState.user_id == target_user_id,
+            EntityState.domain == "device_tracker"
+        )
+        res_states = await db.execute(stmt_states)
+        states = res_states.scalars().all()
+        return [
+            {
+                "id": f"state_{st.entity_id}",
+                "entity_id": st.entity_id,
+                "user_id": st.user_id,
+                "latitude": st.latitude,
+                "longitude": st.longitude,
+                "accuracy": st.attributes.get("gps_accuracy") if isinstance(st.attributes, dict) else None,
+                "battery_level": st.attributes.get("battery_level") or st.attributes.get("battery") if isinstance(st.attributes, dict) else None,
+                "timestamp": st.last_updated.isoformat() if hasattr(st.last_updated, "isoformat") else str(st.last_updated)
+            }
+            for st in states
+            if st.latitude is not None and st.longitude is not None
+        ]
+
+    return [
+        {
+            "id": str(r.id),
+            "entity_id": f"device_tracker.device_{r.device_id}",
+            "user_id": r.user_id,
+            "latitude": r.latitude,
+            "longitude": r.longitude,
+            "accuracy": r.accuracy,
+            "altitude": r.altitude,
+            "speed": r.speed,
+            "bearing": r.bearing,
+            "timestamp": r.timestamp.isoformat() if hasattr(r.timestamp, "isoformat") else str(r.timestamp)
+        }
+        for r in records
+    ]
