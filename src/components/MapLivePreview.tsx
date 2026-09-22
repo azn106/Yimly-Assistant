@@ -2,9 +2,11 @@ import React, { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { getMapStyle } from "../lib/mapStyles";
+import { renderMarkerHTML, getMarkerDimensions } from "../lib/markerRenderer";
 
 interface MapLivePreviewProps {
   styleId: string;
+  pinType?: string | null;
   selectedIconSize: number;
   unselectedIconSize: number;
   userColor?: string;
@@ -15,6 +17,7 @@ interface MapLivePreviewProps {
 
 export const MapLivePreview: React.FC<MapLivePreviewProps> = ({
   styleId,
+  pinType = "classic_pin",
   selectedIconSize,
   unselectedIconSize,
   userColor = "#E2D9F3",
@@ -46,7 +49,7 @@ export const MapLivePreview: React.FC<MapLivePreviewProps> = ({
     // Create Selected Marker Element
     const selEl = document.createElement("div");
     selEl.className = "preview-selected-marker flex items-center justify-center transition-all duration-150";
-    const selectedMarker = new maplibregl.Marker({ element: selEl })
+    const selectedMarker = new maplibregl.Marker({ element: selEl, anchor: "bottom" })
       .setLngLat([-122.4194, 37.7749])
       .addTo(map);
     selectedMarkerRef.current = selectedMarker;
@@ -54,7 +57,7 @@ export const MapLivePreview: React.FC<MapLivePreviewProps> = ({
     // Create Unselected Marker Element
     const unselEl = document.createElement("div");
     unselEl.className = "preview-unselected-marker flex items-center justify-center transition-all duration-150";
-    const unselectedMarker = new maplibregl.Marker({ element: unselEl })
+    const unselectedMarker = new maplibregl.Marker({ element: unselEl, anchor: "bottom" })
       .setLngLat([-122.4080, 37.7830])
       .addTo(map);
     unselectedMarkerRef.current = unselectedMarker;
@@ -75,76 +78,49 @@ export const MapLivePreview: React.FC<MapLivePreviewProps> = ({
   // Update Markers HTML and sizes
   useEffect(() => {
     const rawEmoji = deviceIcon ? deviceIcon.split(" ")[0] : "📱";
+    const activePinType = pinType || "classic_pin";
 
     // Update Selected Marker
     if (selectedMarkerRef.current) {
+      const dims = getMarkerDimensions(activePinType, selectedIconSize);
       const el = selectedMarkerRef.current.getElement();
-      el.style.width = `${selectedIconSize}px`;
-      el.style.height = `${selectedIconSize}px`;
-      const innerSize = Math.max(16, selectedIconSize - 6);
+      el.style.width = `${dims.width}px`;
+      el.style.height = `${dims.height}px`;
 
-      el.innerHTML = `
-        <div class="relative w-full h-full rounded-full flex items-center justify-center"
-             style="
-               background-color: white;
-               padding: 3px;
-               box-shadow: 0 0 0 3px ${userColor}, 0 8px 20px rgba(0,0,0,0.25);
-             ">
-          <div class="w-full h-full rounded-full text-white font-black text-xs flex items-center justify-center overflow-hidden"
-               style="
-                 width: ${innerSize}px;
-                 height: ${innerSize}px;
-                 background-color: ${userColor};
-               ">
-            ${
-              userPhoto
-                ? `<img src="${userPhoto}" alt="User" class="w-full h-full object-cover rounded-full pointer-events-none" />`
-                : `<span class="text-slate-800 font-bold">${userInitial}</span>`
-            }
-          </div>
-          <div class="absolute -top-1 -left-1 bg-white text-slate-800 text-[10px] w-4.5 h-4.5 rounded-full shadow-xs border border-slate-200 flex items-center justify-center pointer-events-none">
-            ${rawEmoji}
-          </div>
-          <div class="absolute -bottom-1 -right-1 bg-white text-slate-800 text-[9px] font-black px-1 rounded-full shadow-sm border border-slate-200">
-            95%
-          </div>
-        </div>
-      `;
+      el.innerHTML = renderMarkerHTML({
+        pinType: activePinType,
+        baseColor: userColor,
+        isSelected: true,
+        size: selectedIconSize,
+        photoUrl: userPhoto,
+        memberName: userInitial,
+        deviceIcon: rawEmoji,
+        batteryLevel: 95,
+        showBattery: true
+      });
     }
 
     // Update Unselected Marker
     if (unselectedMarkerRef.current) {
+      const memberColor = "#A8E6CF";
+      const dims = getMarkerDimensions(activePinType, unselectedIconSize);
       const el = unselectedMarkerRef.current.getElement();
-      el.style.width = `${unselectedIconSize}px`;
-      el.style.height = `${unselectedIconSize}px`;
-      const innerSize = Math.max(16, unselectedIconSize - 6);
-      const memberColor = "#FAD2E1";
+      el.style.width = `${dims.width}px`;
+      el.style.height = `${dims.height}px`;
 
-      el.innerHTML = `
-        <div class="relative w-full h-full rounded-full flex items-center justify-center"
-             style="
-               background-color: white;
-               padding: 3px;
-               box-shadow: 0 2px 10px rgba(0,0,0,0.14);
-             ">
-          <div class="w-full h-full rounded-full text-slate-800 font-black text-xs flex items-center justify-center overflow-hidden"
-               style="
-                 width: ${innerSize}px;
-                 height: ${innerSize}px;
-                 background-color: ${memberColor};
-               ">
-            <span>M</span>
-          </div>
-          <div class="absolute -top-1 -left-1 bg-white text-slate-800 text-[10px] w-4.5 h-4.5 rounded-full shadow-xs border border-slate-200 flex items-center justify-center pointer-events-none">
-            📱
-          </div>
-          <div class="absolute -bottom-1 -right-1 bg-white text-slate-800 text-[9px] font-black px-1 rounded-full shadow-sm border border-slate-200">
-            82%
-          </div>
-        </div>
-      `;
+      el.innerHTML = renderMarkerHTML({
+        pinType: activePinType,
+        baseColor: memberColor,
+        isSelected: false,
+        size: unselectedIconSize,
+        photoUrl: null,
+        memberName: "M",
+        deviceIcon: "📱",
+        batteryLevel: 82,
+        showBattery: true
+      });
     }
-  }, [selectedIconSize, unselectedIconSize, userColor, userPhoto, userInitial, deviceIcon]);
+  }, [pinType, selectedIconSize, unselectedIconSize, userColor, userPhoto, userInitial, deviceIcon]);
 
   return (
     <div className="relative w-full h-64 md:h-72 rounded-2xl overflow-hidden border border-slate-200/80 shadow-inner bg-slate-100">

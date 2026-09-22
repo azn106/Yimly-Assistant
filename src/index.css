@@ -1,5 +1,21 @@
 @import "tailwindcss";
 
+:root {
+  --theme-p1: #D47AE8;
+  --theme-p2: #F4BEEE;
+  --theme-p3: #A8ECE7;
+  --theme-p4: #FDFF8F;
+  --theme-accent: #D47AE8;
+  --theme-accent-light: #F4BEEE;
+  --theme-accent-mint: #A8ECE7;
+  --theme-accent-yellow: #FDFF8F;
+  --theme-accent-subtle: rgba(212, 122, 232, 0.12);
+  --theme-accent-subtle-hover: rgba(212, 122, 232, 0.20);
+  --theme-accent-border: rgba(212, 122, 232, 0.35);
+  --theme-accent-ring: rgba(212, 122, 232, 0.50);
+  --theme-accent-text: #D47AE8;
+}
+
 html,
 body,
 #root {

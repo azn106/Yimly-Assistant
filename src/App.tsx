@@ -28,7 +28,14 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [user, setUser] = useState<UserInfo | null>(null);
+  const [user, setUser] = useState<UserInfo | null>(() => {
+    try {
+      const saved = localStorage.getItem("user_info");
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
 
   // Circles States
   const [circles, setCircles] = useState<Circle[]>([]);
@@ -430,9 +437,11 @@ export default function App() {
             <MapComponent
               ref={mapComponentRef}
               members={circleMembers}
+              currentUser={user}
               onRefresh={() => selectedCircle && fetchCircleMembers(selectedCircle.id)}
               loading={circlesLoading}
               mapStyle={user?.map_style}
+              mapPinType={user?.map_pin_type}
               selectedIconSize={user?.map_selected_icon_size}
               unselectedIconSize={user?.map_unselected_icon_size}
               selectedMemberId={selectedMemberId}
@@ -441,13 +450,13 @@ export default function App() {
           </div>
 
           {/* 2. FLOATING NAVIGATION DOCK (DESKTOP) */}
-          <nav className="hidden md:flex fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-white/85 backdrop-blur-2xl p-2 rounded-full border border-white/80 shadow-2xl items-center gap-1.5 pointer-events-auto">
+          <nav className="hidden md:flex fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-white/85 backdrop-blur-2xl p-2 rounded-full border border-white/80 shadow-[0_16px_48px_rgba(0,0,0,0.12)] items-center gap-1.5 pointer-events-auto">
             <button
               onClick={() => setActiveTab("map")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition cursor-pointer ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition-all duration-150 cursor-pointer active:scale-95 ${
                 activeTab === "map"
                   ? "bg-slate-900 text-white shadow-md"
-                  : "text-slate-600 hover:bg-slate-100/70"
+                  : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
               }`}
             >
               <NavIcon tab="map" pack={navIconPack} isSelected={activeTab === "map"} className="w-4 h-4" />
@@ -456,10 +465,10 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab("people")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition cursor-pointer ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition-all duration-150 cursor-pointer active:scale-95 ${
                 activeTab === "people"
                   ? "bg-slate-900 text-white shadow-md"
-                  : "text-slate-600 hover:bg-slate-100/70"
+                  : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
               }`}
             >
               <NavIcon tab="people" pack={navIconPack} isSelected={activeTab === "people"} className="w-4 h-4" />
@@ -468,10 +477,10 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab("places")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition cursor-pointer ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition-all duration-150 cursor-pointer active:scale-95 ${
                 activeTab === "places"
                   ? "bg-slate-900 text-white shadow-md"
-                  : "text-slate-600 hover:bg-slate-100/70"
+                  : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
               }`}
             >
               <NavIcon tab="places" pack={navIconPack} isSelected={activeTab === "places"} className="w-4 h-4" />
@@ -480,10 +489,10 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab("alerts")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition cursor-pointer ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition-all duration-150 cursor-pointer active:scale-95 ${
                 activeTab === "alerts"
                   ? "bg-slate-900 text-white shadow-md"
-                  : "text-slate-600 hover:bg-slate-100/70"
+                  : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
               }`}
             >
               <NavIcon tab="alerts" pack={navIconPack} isSelected={activeTab === "alerts"} className="w-4 h-4" />
@@ -495,7 +504,7 @@ export default function App() {
             {/* Profile Avatar Pill (Settings & Account) */}
             <div 
               onClick={() => setActiveTab("settings")}
-              className={`w-8 h-8 rounded-full text-white font-extrabold text-xs flex items-center justify-center cursor-pointer shadow-sm transition hover:scale-105 overflow-hidden shrink-0 ${
+              className={`w-8 h-8 rounded-full text-white font-extrabold text-xs flex items-center justify-center cursor-pointer shadow-sm transition-all duration-150 hover:scale-105 active:scale-95 overflow-hidden shrink-0 ${
                 activeTab === "settings"
                   ? "ring-2 ring-slate-900 ring-offset-2 scale-105"
                   : ""
@@ -546,7 +555,7 @@ export default function App() {
             <div className="md:hidden fixed top-[max(0.75rem,env(safe-area-inset-top))] right-4 z-30 pointer-events-auto">
               <button
                 onClick={() => setActiveTab("settings")}
-                className="w-10 h-10 bg-white/90 backdrop-blur-2xl rounded-full border border-white/80 shadow-[0_4px_20px_rgba(0,0,0,0.08)] flex items-center justify-center text-slate-700 hover:text-indigo-600 active:scale-95 transition cursor-pointer"
+                className="w-10 h-10 bg-white/85 backdrop-blur-2xl rounded-full border border-white/80 shadow-[0_4px_20px_rgba(0,0,0,0.08)] flex items-center justify-center text-slate-700 hover:text-indigo-600 active:scale-95 transition-all duration-150 cursor-pointer"
                 title="Settings"
               >
                 <SettingsIcon className="w-4.5 h-4.5" />
@@ -645,7 +654,18 @@ export default function App() {
 
                 {/* Secondary Tab Content */}
                 {activeTab === "people" && (
-                  <PeopleTab members={circleMembers} loading={circlesLoading} />
+                  <PeopleTab
+                    members={circleMembers}
+                    loading={circlesLoading}
+                    onSelectMember={(member) => {
+                      setActiveTab("map");
+                      if (mapComponentRef.current) {
+                        mapComponentRef.current.focusMember(member);
+                      } else {
+                        setSelectedMemberId(member.id);
+                      }
+                    }}
+                  />
                 )}
 
                 {activeTab === "places" && (

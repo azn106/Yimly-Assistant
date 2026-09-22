@@ -1,7 +1,9 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback, useLayoutEffect } from "react";
+import { createPortal } from "react-dom";
 import QRCode from "qrcode";
 import { UserInfo, Circle, UserDevice } from "../types";
 import { MAP_STYLES } from "../lib/mapStyles";
+import { MAP_PIN_TYPES, renderMarkerHTML } from "../lib/markerRenderer";
 import { MapLivePreview } from "./MapLivePreview";
 import { QRScannerModal } from "./QRScannerModal";
 import {
@@ -48,23 +50,337 @@ interface SettingsTabProps {
   circlesLoading?: boolean;
 }
 
-const PASTEL_PALETTE = [
-  { name: "Soft Lavender", hex: "#E2D9F3" },
-  { name: "Rose Quartz", hex: "#FAD2E1" },
-  { name: "Peach Puff", hex: "#FDE2E4" },
-  { name: "Pale Melon", hex: "#FFF1E6" },
-  { name: "Pale Custard", hex: "#FFFCF2" },
-  { name: "Mint Foam", hex: "#E2F0CB" },
-  { name: "Pale Turquoise", hex: "#C7F9CC" },
-  { name: "Powder Green", hex: "#D8F3DC" },
-  { name: "Sky Mist", hex: "#D8E2DC" },
-  { name: "Baby Blue", hex: "#BEE3DB" },
-  { name: "Periwinkle", hex: "#E8ECFB" },
-  { name: "Lilac Whisper", hex: "#E8DBFC" },
-  { name: "Orchid Petal", hex: "#F3C6F1" },
-  { name: "Cotton Candy", hex: "#FFC6FF" },
-  { name: "Desert Sage", hex: "#ECE4DB" }
+const ACCOUNT_COLOUR_PRESETS = [
+  { name: "Pastel Red", hex: "#FF9AA2" },
+  { name: "Pastel Orange", hex: "#FFB347" },
+  { name: "Pastel Yellow", hex: "#FDFF8F" },
+  { name: "Pastel Green", hex: "#A8E6CF" },
+  { name: "Pastel Cyan", hex: "#A8ECE7" },
+  { name: "Pastel Blue", hex: "#B8B5FF" },
+  { name: "Pastel Purple", hex: "#D47AE8" }
 ];
+
+const isValidHex = (hex: string): boolean => {
+  return /^#?([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(hex.trim());
+};
+
+const normalizeHex = (hex: string): string => {
+  let clean = hex.trim();
+  if (!clean.startsWith("#")) {
+    clean = "#" + clean;
+  }
+  if (clean.length === 4) {
+    clean = `#${clean[1]}${clean[1]}${clean[2]}${clean[2]}${clean[3]}${clean[3]}`;
+  }
+  return clean.toUpperCase();
+};
+
+function hexToHsv(hex: string): { h: number; s: number; v: number } {
+  let cleaned = hex.replace("#", "").trim();
+  if (cleaned.length === 3) {
+    cleaned = cleaned.split("").map((c) => c + c).join("");
+  }
+  if (cleaned.length !== 6 || !/^[0-9A-Fa-f]{6}$/.test(cleaned)) {
+    return { h: 0, s: 1, v: 1 };
+  }
+
+  const r = parseInt(cleaned.substring(0, 2), 16) / 255;
+  const g = parseInt(cleaned.substring(2, 4), 16) / 255;
+  const b = parseInt(cleaned.substring(4, 6), 16) / 255;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = Math.round(h * 60);
+    if (h < 0) h += 360;
+  }
+
+  const s = max === 0 ? 0 : d / max;
+  const v = max;
+
+  return { h, s, v };
+}
+
+function hsvToHex(h: number, s: number, v: number): string {
+  s = Math.max(0, Math.min(1, s));
+  v = Math.max(0, Math.min(1, v));
+  h = (h % 360 + 360) % 360;
+
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+
+  if (h < 60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+
+  const toHex = (n: number) => {
+    const val = Math.round((n + m) * 255);
+    return Math.max(0, Math.min(255, val)).toString(16).padStart(2, "0");
+  };
+
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+}
+
+interface CustomColorPickerPopoverProps {
+  color: string;
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onChange: (newHex: string) => void;
+  onClose: () => void;
+}
+
+const CustomColorPickerPopover: React.FC<CustomColorPickerPopoverProps> = ({
+  color,
+  anchorRef,
+  onChange,
+  onClose
+}) => {
+  const satValRef = useRef<HTMLDivElement>(null);
+  const hueRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const [hsv, setHsv] = useState<{ h: number; s: number; v: number }>(() => hexToHsv(color));
+  const [coords, setCoords] = useState<{ top: number; left: number }>({ top: -9999, left: -9999 });
+
+  useEffect(() => {
+    if (isValidHex(color)) {
+      const normalized = normalizeHex(color);
+      const currentHex = hsvToHex(hsv.h, hsv.s, hsv.v);
+      if (normalized !== currentHex) {
+        setHsv(hexToHsv(color));
+      }
+    }
+  }, [color]);
+
+  const updatePosition = useCallback(() => {
+    if (!anchorRef.current) return;
+    const rect = anchorRef.current.getBoundingClientRect();
+
+    const popoverWidth = popoverRef.current?.offsetWidth || 270;
+    const popoverHeight = popoverRef.current?.offsetHeight || 290;
+    const margin = 12;
+
+    // Vertical positioning: default below button, flip above if overflowing bottom
+    let top = rect.bottom + 8;
+    if (top + popoverHeight > window.innerHeight - margin && rect.top - popoverHeight - 8 > margin) {
+      top = rect.top - popoverHeight - 8;
+    }
+    // Clamp top to stay within viewport
+    top = Math.max(margin, Math.min(top, window.innerHeight - popoverHeight - margin));
+
+    // Horizontal positioning: align right edge of popover with button right edge if fits, else left edge
+    let left = rect.right - popoverWidth;
+    if (left < margin) {
+      left = rect.left;
+    }
+    // Strictly clamp left so popover is always within [margin, window.innerWidth - popoverWidth - margin]
+    const maxLeft = Math.max(margin, window.innerWidth - popoverWidth - margin);
+    left = Math.max(margin, Math.min(left, maxLeft));
+
+    setCoords({ top, left });
+  }, [anchorRef]);
+
+  useLayoutEffect(() => {
+    updatePosition();
+  }, [updatePosition]);
+
+  useEffect(() => {
+    updatePosition();
+    const handleScrollOrResize = () => updatePosition();
+    window.addEventListener("resize", handleScrollOrResize);
+    window.addEventListener("scroll", handleScrollOrResize, true);
+    return () => {
+      window.removeEventListener("resize", handleScrollOrResize);
+      window.removeEventListener("scroll", handleScrollOrResize, true);
+    };
+  }, [updatePosition]);
+
+  const updateSatVal = (clientX: number, clientY: number) => {
+    if (!satValRef.current) return;
+    const rect = satValRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    const y = Math.max(0, Math.min(rect.height, clientY - rect.top));
+
+    const s = x / rect.width;
+    const v = 1 - y / rect.height;
+
+    setHsv((prev) => {
+      const next = { ...prev, s, v };
+      const newHex = hsvToHex(next.h, next.s, next.v);
+      onChange(newHex);
+      return next;
+    });
+  };
+
+  const handleSatValPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    updateSatVal(e.clientX, e.clientY);
+  };
+
+  const handleSatValPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.buttons === 1 || e.currentTarget.hasPointerCapture(e.pointerId)) {
+      updateSatVal(e.clientX, e.clientY);
+    }
+  };
+
+  const handleSatValPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  };
+
+  const updateHue = (clientX: number) => {
+    if (!hueRef.current) return;
+    const rect = hueRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+
+    const h = Math.round((x / rect.width) * 360);
+
+    setHsv((prev) => {
+      const next = { ...prev, h };
+      const newHex = hsvToHex(next.h, next.s, next.v);
+      onChange(newHex);
+      return next;
+    });
+  };
+
+  const handleHuePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    updateHue(e.clientX);
+  };
+
+  const handleHuePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.buttons === 1 || e.currentTarget.hasPointerCapture(e.pointerId)) {
+      updateHue(e.clientX);
+    }
+  };
+
+  const handleHuePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  };
+
+  const currentHex = hsvToHex(hsv.h, hsv.s, hsv.v);
+
+  return createPortal(
+    <>
+      <div
+        className="fixed inset-0 z-[9998] bg-black/0 cursor-default"
+        onClick={onClose}
+      />
+      <div
+        ref={popoverRef}
+        id="custom-color-picker-popover"
+        className="fixed z-[9999] w-[270px] max-w-[calc(100vw-24px)] p-3.5 bg-white/95 backdrop-blur-xl border border-slate-200/90 rounded-2xl shadow-2xl space-y-3 select-none transition-opacity duration-100"
+        style={{
+          top: `${coords.top}px`,
+          left: `${coords.left}px`,
+          opacity: coords.top === -9999 ? 0 : 1
+        }}
+      >
+        <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+          <span>Custom Colour</span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition cursor-pointer"
+            title="Close colour picker"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* 2D Saturation / Value Canvas Area */}
+        <div
+          ref={satValRef}
+          onPointerDown={handleSatValPointerDown}
+          onPointerMove={handleSatValPointerMove}
+          onPointerUp={handleSatValPointerUp}
+          className="relative w-full h-32 rounded-xl cursor-crosshair overflow-hidden touch-none shadow-inner border border-slate-200/80"
+          style={{
+            backgroundColor: `hsl(${hsv.h}, 100%, 50%)`,
+            backgroundImage: `
+              linear-gradient(to top, #000, transparent),
+              linear-gradient(to right, #fff, transparent)
+            `,
+          }}
+        >
+          <div
+            className="absolute w-4.5 h-4.5 -ml-2.25 -mt-2.25 rounded-full border-2 border-white shadow-md pointer-events-none transition-transform active:scale-125"
+            style={{
+              left: `${hsv.s * 100}%`,
+              top: `${(1 - hsv.v) * 100}%`,
+              backgroundColor: currentHex,
+            }}
+          />
+        </div>
+
+        {/* 1D Hue Spectrum Slider */}
+        <div className="space-y-1">
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Hue</div>
+          <div
+            ref={hueRef}
+            onPointerDown={handleHuePointerDown}
+            onPointerMove={handleHuePointerMove}
+            onPointerUp={handleHuePointerUp}
+            className="relative w-full h-4 rounded-full cursor-pointer touch-none shadow-inner border border-slate-200/80 overflow-hidden"
+            style={{
+              background: `linear-gradient(to right, 
+                #ff0000 0%, 
+                #ffff00 17%, 
+                #00ff00 33%, 
+                #00ffff 50%, 
+                #0000ff 67%, 
+                #ff00ff 83%, 
+                #ff0000 100%
+              )`,
+            }}
+          >
+            <div
+              className="absolute top-0 bottom-0 w-3.5 -ml-1.75 rounded-full border-2 border-white shadow-md pointer-events-none"
+              style={{
+                left: `${(hsv.h / 360) * 100}%`,
+                backgroundColor: `hsl(${hsv.h}, 100%, 50%)`,
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Current Color Readout */}
+        <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+          <div className="flex items-center gap-2">
+            <div
+              className="w-5 h-5 rounded-md border border-slate-200 shadow-2xs"
+              style={{ backgroundColor: currentHex }}
+            />
+            <span className="font-mono font-bold text-xs text-slate-800">{currentHex}</span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs rounded-lg transition cursor-pointer"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </>,
+    document.body
+  );
+};
 
 const DEVICE_ICONS = [
   "📱 Phone",
@@ -88,6 +404,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   onLeaveCircle,
   circlesLoading = false
 }) => {
+  const getToken = () => localStorage.getItem("access_token") || localStorage.getItem("token") || "";
+
   // Section Expand States (Default all collapsed)
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
     account: false,
@@ -107,7 +425,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   // ----------------------------------------------------
   const [displayName, setDisplayName] = useState(user?.display_name || "");
   const [username, setUsername] = useState(user?.username || "");
-  const [avatarColor, setAvatarColor] = useState(user?.avatar_color || "#E2D9F3");
+  const [avatarColor, setAvatarColor] = useState(user?.avatar_color || "#FF9AA2");
+  const [hexInput, setHexInput] = useState((user?.avatar_color || "#FF9AA2").toUpperCase());
+  const [showColorPicker, setShowColorPicker] = useState(false);
+  const colorPickerBtnRef = useRef<HTMLButtonElement>(null);
   const [savingAccount, setSavingAccount] = useState(false);
   const [accountSuccess, setAccountSuccess] = useState<string | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
@@ -132,9 +453,41 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     if (user) {
       setDisplayName(user.display_name || "");
       setUsername(user.username || "");
-      setAvatarColor(user.avatar_color || "#E2D9F3");
+      const initialColor = user.avatar_color || "#FF9AA2";
+      setAvatarColor(initialColor);
+      setHexInput(initialColor.toUpperCase());
     }
   }, [user]);
+
+  const handleSelectPreset = (presetHex: string) => {
+    setAvatarColor(presetHex);
+    setHexInput(presetHex.toUpperCase());
+  };
+
+  const handleHexInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setHexInput(val);
+    if (isValidHex(val)) {
+      const normalized = normalizeHex(val);
+      setAvatarColor(normalized);
+    }
+  };
+
+  const handleHexInputBlur = () => {
+    if (isValidHex(hexInput)) {
+      const normalized = normalizeHex(hexInput);
+      setHexInput(normalized);
+      setAvatarColor(normalized);
+    } else {
+      setHexInput((avatarColor || "#FF9AA2").toUpperCase());
+    }
+  };
+
+  const handleNativeColorPickerChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value.toUpperCase();
+    setHexInput(val);
+    setAvatarColor(val);
+  };
 
   const handleSaveAccount = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -143,7 +496,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     setAccountSuccess(null);
 
     try {
-      const token = localStorage.getItem("token");
+      const token = getToken();
       const res = await fetch("/api/auth/profile", {
         method: "PUT",
         headers: {
@@ -188,7 +541,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     try {
       const formData = new FormData();
       formData.append("picture", file);
-      const token = localStorage.getItem("token");
+      const token = getToken();
 
       const res = await fetch("/api/auth/profile/picture", {
         method: "POST",
@@ -220,7 +573,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     setAccountError(null);
 
     try {
-      const token = localStorage.getItem("token");
+      const token = getToken();
       const res = await fetch("/api/auth/profile/picture", {
         method: "DELETE",
         headers: {
@@ -262,7 +615,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     setPasswordLoading(true);
 
     try {
-      const token = localStorage.getItem("token");
+      const token = getToken();
       const res = await fetch("/api/auth/password", {
         method: "POST",
         headers: {
@@ -384,15 +737,18 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   // SECTION 3: MAPS STATE
   // ----------------------------------------------------
   const [mapStyle, setMapStyle] = useState<string>(user?.map_style || "osm");
+  const [mapPinType, setMapPinType] = useState<string>(user?.map_pin_type || "classic_pin");
   const [selectedIconSize, setSelectedIconSize] = useState<number>(
     user?.map_selected_icon_size || 48
   );
   const [unselectedIconSize, setUnselectedIconSize] = useState<number>(
     user?.map_unselected_icon_size || 36
   );
+  const [isPinDropdownOpen, setIsPinDropdownOpen] = useState<boolean>(false);
 
   useEffect(() => {
     if (user?.map_style) setMapStyle(user.map_style);
+    if (user?.map_pin_type) setMapPinType(user.map_pin_type);
     if (user?.map_selected_icon_size) setSelectedIconSize(user.map_selected_icon_size);
     if (user?.map_unselected_icon_size) setUnselectedIconSize(user.map_unselected_icon_size);
   }, [user]);
@@ -400,11 +756,12 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   // Persist Maps settings
   const persistMapPreferences = async (updates: {
     map_style?: string;
+    map_pin_type?: string;
     map_selected_icon_size?: number;
     map_unselected_icon_size?: number;
   }) => {
     try {
-      const token = localStorage.getItem("token");
+      const token = getToken();
       const res = await fetch("/api/auth/profile", {
         method: "PUT",
         headers: {
@@ -425,6 +782,12 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const handleMapStyleChange = (newStyle: string) => {
     setMapStyle(newStyle);
     persistMapPreferences({ map_style: newStyle });
+  };
+
+  const handleMapPinTypeChange = (newPinType: string) => {
+    setMapPinType(newPinType);
+    setIsPinDropdownOpen(false);
+    persistMapPreferences({ map_pin_type: newPinType });
   };
 
   const handleSelectedIconSizeChange = (size: number) => {
@@ -469,7 +832,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     location_update_frequency?: string;
   }) => {
     try {
-      const token = localStorage.getItem("token");
+      const token = getToken();
       const res = await fetch("/api/auth/profile", {
         method: "PUT",
         headers: {
@@ -522,7 +885,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     notify_device_offline?: boolean;
   }) => {
     try {
-      const token = localStorage.getItem("token");
+      const token = getToken();
       const res = await fetch("/api/auth/profile", {
         method: "PUT",
         headers: {
@@ -551,7 +914,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const fetchDevices = async () => {
     setDevicesLoading(true);
     try {
-      const token = localStorage.getItem("token");
+      const token = getToken();
       const res = await fetch("/api/devices", {
         headers: {
           Authorization: `Bearer ${token}`
@@ -574,10 +937,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   const handleUpdateDevice = async (
     entityId: string,
-    updates: { name?: string; location_visibility?: "family" | "me_only"; map_icon?: string }
+    updates: { name?: string; location_visibility?: "family" | "me_only"; map_icon?: string; allow_find_my_device?: boolean }
   ) => {
     try {
-      const token = localStorage.getItem("token");
+      const token = getToken();
       const res = await fetch(`/api/devices/${encodeURIComponent(entityId)}`, {
         method: "PUT",
         headers: {
@@ -774,31 +1137,94 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 </div>
               </div>
 
-              {/* Avatar Colour Palette */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+              {/* Account Colours */}
+              <div className="space-y-3" id="account-colours-container">
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
                   Colour
                 </label>
-                <div className="flex flex-wrap gap-2.5 items-center">
-                  {PASTEL_PALETTE.map((c) => {
-                    const isSelected = avatarColor.toLowerCase() === c.hex.toLowerCase();
+
+                {/* Row 1: Exactly 7 selectable circular colour swatches in one compact row */}
+                <div className="flex items-center gap-2.5 py-0.5">
+                  {ACCOUNT_COLOUR_PRESETS.map((preset) => {
+                    const isSelected = avatarColor.toLowerCase() === preset.hex.toLowerCase();
                     return (
                       <button
-                        key={c.hex}
+                        key={preset.hex}
                         type="button"
-                        onClick={() => setAvatarColor(c.hex)}
-                        className={`w-7 h-7 rounded-full transition-transform duration-150 flex items-center justify-center cursor-pointer shadow-xs border ${
+                        onClick={() => handleSelectPreset(preset.hex)}
+                        id={`account-colour-preset-${preset.name.toLowerCase().replace(/\s+/g, "-")}`}
+                        className={`w-7 h-7 rounded-full transition-all duration-150 flex items-center justify-center cursor-pointer shadow-2xs border shrink-0 ${
                           isSelected
-                            ? "ring-2 ring-indigo-600 ring-offset-2 scale-110 border-indigo-400"
+                            ? "ring-2 ring-indigo-600 ring-offset-1.5 scale-105 border-indigo-400 shadow-xs"
                             : "hover:scale-105 border-black/10"
                         }`}
-                        style={{ backgroundColor: c.hex }}
-                        title={c.name}
+                        style={{ backgroundColor: preset.hex }}
+                        title={`${preset.name} (${preset.hex})`}
+                        aria-label={`${preset.name} ${preset.hex}`}
+                        aria-pressed={isSelected}
                       >
-                        {isSelected && <Check className="w-3.5 h-3.5 text-slate-800" />}
+                        {isSelected && <Check className="w-3 h-3 text-slate-800 stroke-[2.5]" />}
                       </button>
                     );
                   })}
+                </div>
+
+                {/* Row 2: HEX [ #________ ] [ colour swatch/picker ] */}
+                <div className="flex items-center gap-2.5 pt-0.5">
+                  <span className="text-xs font-bold text-slate-600 select-none tracking-wide">HEX</span>
+                  <div className="relative w-32 sm:w-36">
+                    <input
+                      type="text"
+                      id="account-hex-input"
+                      value={hexInput}
+                      onChange={handleHexInputChange}
+                      onBlur={handleHexInputBlur}
+                      placeholder="#FF9AA2"
+                      maxLength={7}
+                      className="w-full h-8 px-2.5 bg-white border border-slate-200/80 rounded-xl text-xs font-mono font-bold text-slate-800 uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 shadow-xs transition tracking-wide"
+                      aria-label="Account Colour HEX Code"
+                    />
+                  </div>
+
+                  {/* Polished Colour Swatch Picker Button */}
+                  <div className="relative">
+                    <button
+                      ref={colorPickerBtnRef}
+                      type="button"
+                      id="account-color-picker-button"
+                      onClick={() => setShowColorPicker(!showColorPicker)}
+                      className={`w-8 h-8 rounded-xl border flex items-center justify-center cursor-pointer shadow-xs transition-all duration-150 hover:scale-105 active:scale-95 relative overflow-hidden shrink-0 ${
+                        !ACCOUNT_COLOUR_PRESETS.some((p) => p.hex.toLowerCase() === avatarColor.toLowerCase())
+                          ? "ring-2 ring-indigo-600 ring-offset-1.5 border-indigo-400 shadow-xs"
+                          : "border-slate-200/90 hover:border-slate-300"
+                      }`}
+                      style={{
+                        backgroundColor: isValidHex(avatarColor) ? normalizeHex(avatarColor) : "#FF9AA2"
+                      }}
+                      title="Choose custom colour"
+                      aria-label="Choose custom colour"
+                    >
+                      <div className="absolute inset-0 rounded-xl ring-1 ring-inset ring-black/10 pointer-events-none" />
+                    </button>
+
+                    {showColorPicker && (
+                      <CustomColorPickerPopover
+                        anchorRef={colorPickerBtnRef}
+                        color={isValidHex(avatarColor) ? normalizeHex(avatarColor) : "#FF9AA2"}
+                        onChange={(newHex) => {
+                          setAvatarColor(newHex);
+                          setHexInput(newHex);
+                        }}
+                        onClose={() => setShowColorPicker(false)}
+                      />
+                    )}
+                  </div>
+
+                  {!ACCOUNT_COLOUR_PRESETS.some((p) => p.hex.toLowerCase() === avatarColor.toLowerCase()) && (
+                    <span className="text-[11px] font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-100">
+                      Custom Active
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -1033,6 +1459,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <div>
               <MapLivePreview
                 styleId={mapStyle}
+                pinType={mapPinType}
                 selectedIconSize={selectedIconSize}
                 unselectedIconSize={unselectedIconSize}
                 userColor={avatarColor}
@@ -1043,7 +1470,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             </div>
 
             {/* Controls (Bottom Half) */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 pt-2">
               {/* 2. Map Tile Style Dropdown */}
               <div className="space-y-2">
                 <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
@@ -1069,7 +1496,95 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 </p>
               </div>
 
-              {/* 3. Selected Member Icon Size Slider */}
+              {/* 3. Map Pin Type Dropdown */}
+              <div className="space-y-2 relative">
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Map Pin Type
+                </label>
+                
+                <div className="relative">
+                  <button
+                    type="button"
+                    id="map-pin-type-dropdown-trigger"
+                    onClick={() => setIsPinDropdownOpen(!isPinDropdownOpen)}
+                    className="w-full flex items-center justify-between px-3 py-1.5 bg-white border border-slate-200/80 rounded-xl text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 shadow-xs cursor-pointer transition hover:bg-slate-50/80"
+                  >
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      {/* Visual Marker Preview Thumbnail */}
+                      <div
+                        className="w-6 h-7 shrink-0 flex items-center justify-center overflow-hidden"
+                        dangerouslySetInnerHTML={{
+                          __html: renderMarkerHTML({
+                            pinType: mapPinType,
+                            baseColor: avatarColor || "#4f46e5",
+                            isSelected: true,
+                            size: 20,
+                            photoUrl: user?.profile_picture_url,
+                            memberName: (displayName || username || "U").charAt(0).toUpperCase(),
+                            showBattery: false
+                          })
+                        }}
+                      />
+                      <span className="truncate text-xs font-bold text-slate-800">
+                        {MAP_PIN_TYPES.find((p) => p.id === mapPinType)?.name || "Classic Pin"}
+                      </span>
+                    </div>
+                    <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${isPinDropdownOpen ? "rotate-180" : ""}`} />
+                  </button>
+
+                  {/* Dropdown Options Popup */}
+                  {isPinDropdownOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-40"
+                        onClick={() => setIsPinDropdownOpen(false)}
+                      />
+                      <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-white/95 backdrop-blur-xl border border-slate-200/90 rounded-2xl shadow-xl max-h-72 overflow-y-auto p-1.5 space-y-0.5 divide-y divide-slate-100/60">
+                        {MAP_PIN_TYPES.map((pin) => {
+                          const isCurrent = pin.id === mapPinType;
+                          return (
+                            <button
+                              key={pin.id}
+                              type="button"
+                              onClick={() => handleMapPinTypeChange(pin.id)}
+                              className={`w-full flex items-center justify-between p-2 rounded-xl transition text-left cursor-pointer ${
+                                isCurrent ? "bg-indigo-50/80 text-indigo-900 font-bold" : "hover:bg-slate-50 text-slate-700"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5">
+                                <div
+                                  className="w-6 h-7 shrink-0 flex items-center justify-center"
+                                  dangerouslySetInnerHTML={{
+                                    __html: renderMarkerHTML({
+                                      pinType: pin.id,
+                                      baseColor: avatarColor || "#4f46e5",
+                                      isSelected: isCurrent,
+                                      size: 20,
+                                      photoUrl: user?.profile_picture_url,
+                                      memberName: (displayName || username || "U").charAt(0).toUpperCase(),
+                                      showBattery: false
+                                    })
+                                  }}
+                                />
+                                <div>
+                                  <div className="text-xs font-bold leading-tight">{pin.name}</div>
+                                  <div className="text-[10px] text-slate-400 font-medium leading-tight">{pin.description}</div>
+                                </div>
+                              </div>
+                              {isCurrent && <Check className="w-4 h-4 text-indigo-600 shrink-0 ml-1" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-400 font-medium">
+                  {MAP_PIN_TYPES.find((p) => p.id === mapPinType)?.description || "Select marker pin geometry"}
+                </p>
+              </div>
+
+              {/* 4. Selected Member Icon Size Slider */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">
@@ -1624,6 +2139,29 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                         </select>
                         <ChevronDown className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                       </div>
+                    </div>
+
+                    {/* Allow Find My Device Toggle */}
+                    <div className="flex items-center justify-between p-3.5 rounded-xl bg-white border border-slate-200/80 mt-2">
+                      <div>
+                        <span className="block text-xs font-bold text-slate-800">Allow Find My Device</span>
+                        <span className="text-[10px] text-slate-400 font-medium">
+                          Allow Family Circle members to trigger a sound alert on this device
+                        </span>
+                      </div>
+                      <label className="relative inline-flex items-center cursor-pointer shrink-0 ml-2">
+                        <input
+                          type="checkbox"
+                          checked={device.allow_find_my_device !== false}
+                          onChange={(e) =>
+                            handleUpdateDevice(device.entity_id, {
+                              allow_find_my_device: e.target.checked
+                            })
+                          }
+                          className="sr-only peer"
+                        />
+                        <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                      </label>
                     </div>
                   </div>
                 );

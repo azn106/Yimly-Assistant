@@ -5,9 +5,10 @@ import { UserCheck } from "lucide-react";
 interface PeopleTabProps {
   members: CircleMember[];
   loading: boolean;
+  onSelectMember?: (member: CircleMember) => void;
 }
 
-export const PeopleTab: React.FC<PeopleTabProps> = ({ members, loading }) => {
+export const PeopleTab: React.FC<PeopleTabProps> = ({ members, loading, onSelectMember }) => {
   return (
     <div className="bg-white p-7 sm:p-8 rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] max-w-4xl mx-auto space-y-6">
       <div>
@@ -16,7 +17,7 @@ export const PeopleTab: React.FC<PeopleTabProps> = ({ members, loading }) => {
           Family Members
         </h2>
         <p className="text-xs text-slate-400 font-semibold mt-1 leading-relaxed">
-          Review the members and active companion app devices registered under this Circle.
+          Review the members and active companion app devices registered under this Circle. Click any member to focus on the map.
         </p>
       </div>
 
@@ -36,12 +37,13 @@ export const PeopleTab: React.FC<PeopleTabProps> = ({ members, loading }) => {
           {members.map((member) => (
             <div
               key={member.id}
-              className="flex items-center justify-between p-4.5 hover:bg-slate-50/40 transition duration-150"
+              onClick={() => onSelectMember?.(member)}
+              className="flex items-center justify-between p-4.5 hover:bg-slate-50/70 transition duration-150 cursor-pointer group"
             >
               {/* Left Side: Avatar & Display Name */}
               <div className="flex items-center gap-3.5">
                 <div 
-                  className="h-10 w-10 text-white font-black text-sm rounded-full flex items-center justify-center select-none shadow-sm transition-all duration-300 overflow-hidden shrink-0"
+                  className="h-10 w-10 text-white font-black text-sm rounded-full flex items-center justify-center select-none shadow-sm transition-all duration-300 overflow-hidden shrink-0 group-hover:scale-105"
                   style={{ 
                     backgroundColor: member.avatar_color || "#4f46e5", 
                     border: member.avatar_color ? "2px solid white" : "none",
@@ -60,7 +62,7 @@ export const PeopleTab: React.FC<PeopleTabProps> = ({ members, loading }) => {
                   )}
                 </div>
                 <div>
-                  <p className="text-sm font-bold text-slate-800">{member.display_name}</p>
+                  <p className="text-sm font-bold text-slate-800 group-hover:text-indigo-600 transition">{member.display_name}</p>
                 </div>
               </div>
 

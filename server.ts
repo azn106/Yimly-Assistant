@@ -40,6 +40,7 @@ export interface UserData {
   avatar_color?: string | null;
   profile_picture_url?: string | null;
   map_style?: string | null;
+  map_pin_type?: string | null;
   map_selected_icon_size?: number | null;
   map_unselected_icon_size?: number | null;
   share_location?: boolean;
@@ -62,6 +63,7 @@ export function formatUserResponse(u: UserData) {
     avatar_color: u.avatar_color || "#E2D9F3",
     profile_picture_url: u.profile_picture_url || null,
     map_style: u.map_style || "osm",
+    map_pin_type: u.map_pin_type || "classic_pin",
     map_selected_icon_size: u.map_selected_icon_size || 48,
     map_unselected_icon_size: u.map_unselected_icon_size || 36,
     share_location: u.share_location !== false,
@@ -753,6 +755,7 @@ app.put("/api/auth/profile", authenticateToken, (req: AuthRequest, res) => {
     display_name,
     avatar_color,
     map_style,
+    map_pin_type,
     map_selected_icon_size,
     map_unselected_icon_size,
     share_location,
@@ -806,6 +809,24 @@ app.put("/api/auth/profile", authenticateToken, (req: AuthRequest, res) => {
       db.users[userIdx].map_style = map_style;
     } else {
       return res.status(400).json({ detail: "Invalid map_style value" });
+    }
+  }
+
+  if (map_pin_type !== undefined) {
+    const allowedPinTypes = [
+      "classic_pin",
+      "circle",
+      "teardrop",
+      "beacon",
+      "badge",
+      "minimal",
+      "arrow",
+      "photo_pin"
+    ];
+    if (allowedPinTypes.includes(map_pin_type)) {
+      db.users[userIdx].map_pin_type = map_pin_type;
+    } else {
+      return res.status(400).json({ detail: "Invalid map_pin_type value" });
     }
   }
 
@@ -1114,7 +1135,8 @@ app.get("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) =
           last_updated: dt.last_updated,
           platform: dt.attributes?.platform || "Android",
           location_visibility: dt.attributes?.location_visibility || "family",
-          map_icon: dt.attributes?.map_icon || "📱 Phone"
+          map_icon: dt.attributes?.map_icon || "📱 Phone",
+          allow_find_my_device: dt.attributes?.allow_find_my_device !== false
         }));
 
       return {
@@ -1151,7 +1173,8 @@ app.get("/api/devices", authenticateToken, (req: AuthRequest, res) => {
         gps_accuracy: 5,
         platform: "Android",
         location_visibility: "family",
-        map_icon: "📱 Phone"
+        map_icon: "📱 Phone",
+        allow_find_my_device: true
       },
       latitude: 37.7749,
       longitude: -122.4194,
@@ -1170,14 +1193,15 @@ app.get("/api/devices", authenticateToken, (req: AuthRequest, res) => {
     state: dt.state || "home",
     last_updated: dt.last_updated,
     location_visibility: (dt.attributes?.location_visibility || "family") as "family" | "me_only",
-    map_icon: dt.attributes?.map_icon || "📱 Phone"
+    map_icon: dt.attributes?.map_icon || "📱 Phone",
+    allow_find_my_device: dt.attributes?.allow_find_my_device !== false
   }));
 
   res.json(result);
 });
 
 app.put("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) => {
-  const { name, location_visibility, map_icon } = req.body;
+  const { name, location_visibility, map_icon, allow_find_my_device } = req.body;
   db = loadDB();
   const entityId = req.params.entity_id;
   const dtIndex = db.entity_states.findIndex(
@@ -1202,6 +1226,9 @@ app.put("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) =>
   if (map_icon !== undefined) {
     db.entity_states[dtIndex].attributes.map_icon = map_icon;
   }
+  if (allow_find_my_device !== undefined) {
+    db.entity_states[dtIndex].attributes.allow_find_my_device = Boolean(allow_find_my_device);
+  }
 
   db.entity_states[dtIndex].last_updated = new Date().toISOString();
   saveDB(db);
@@ -1215,7 +1242,8 @@ app.put("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) =>
     state: updated.state || "home",
     last_updated: updated.last_updated,
     location_visibility: updated.attributes?.location_visibility || "family",
-    map_icon: updated.attributes?.map_icon || "📱 Phone"
+    map_icon: updated.attributes?.map_icon || "📱 Phone",
+    allow_find_my_device: updated.attributes?.allow_find_my_device !== false
   });
 });
 
@@ -1227,6 +1255,53 @@ app.get("/api/mobile_app/config", authenticateToken, (req: AuthRequest, res) => 
     update_frequency: u?.location_update_frequency || "realtime",
     save_location_history: u ? u.save_location_history !== false : true,
     history_retention: u?.history_retention || "30d"
+  });
+});
+
+// Home Assistant Events API (e.g. find_my event to play sound on a specific device)
+app.post(["/api/events/:event_type", "/api/events"], authenticateToken, (req: AuthRequest, res: Response) => {
+  const eventType = req.params.event_type || req.body?.event_type || "find_my";
+  const entityId = req.body?.entity_id;
+  const requestingUserId = req.user!.id;
+
+  if (!entityId) {
+    return res.status(400).json({ detail: "Target device entity_id is required" });
+  }
+
+  db = loadDB();
+  const targetDevice = db.entity_states.find(
+    (e) => e.entity_id === entityId && e.domain === "device_tracker"
+  );
+
+  if (!targetDevice) {
+    return res.status(404).json({ detail: "Target device entity_id not found" });
+  }
+
+  const targetUserId = targetDevice.user_id;
+
+  // Authorization check: If targeting another member's device, verify Allow Find My Device is ON
+  if (targetUserId !== requestingUserId) {
+    const isAllowed = targetDevice.attributes?.allow_find_my_device !== false;
+    if (!isAllowed) {
+      return res.status(403).json({
+        detail: "Find My Device is disabled for this member's device"
+      });
+    }
+  }
+
+  const deviceName = targetDevice.attributes?.friendly_name || entityId;
+  console.log(`[Home Assistant Event] Fired '${eventType}' strictly for entity ${entityId} (${deviceName}, user ${targetUserId}) by user ${requestingUserId}`);
+
+  res.json({
+    message: `Event '${eventType}' fired for device ${deviceName}.`,
+    event_type: eventType,
+    data: {
+      entity_id: entityId,
+      device_name: deviceName,
+      user_id: targetUserId,
+      triggered_by: requestingUserId,
+      time_fired: new Date().toISOString()
+    }
   });
 });
 

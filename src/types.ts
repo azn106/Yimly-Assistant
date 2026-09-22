@@ -5,6 +5,7 @@ export interface UserInfo {
   avatar_color?: string | null;
   profile_picture_url?: string | null;
   map_style?: string | null;
+  map_pin_type?: string | null;
   map_selected_icon_size?: number | null;
   map_unselected_icon_size?: number | null;
   share_location?: boolean;
@@ -29,6 +30,7 @@ export interface MemberDeviceLocation {
   platform?: string;
   location_visibility?: "family" | "me_only";
   map_icon?: string;
+  allow_find_my_device?: boolean;
 }
 
 export interface UserDevice {
@@ -40,6 +42,7 @@ export interface UserDevice {
   last_updated: string;
   location_visibility: "family" | "me_only";
   map_icon: string;
+  allow_find_my_device?: boolean;
 }
 
 export interface CircleMember {

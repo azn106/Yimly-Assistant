@@ -10,6 +10,7 @@ from app.db.database import get_db
 from app.db.models import User, LocationHistory, CircleMember, EntityState
 from app.schemas.api import ConfigResponse, EntityStateResponse, UnitSystem
 from app.services.state_service import StateService
+from app.services.event_service import event_bus
 
 router = APIRouter()
 
@@ -130,8 +131,49 @@ async def api_events(user: User = Depends(require_authenticated_user)):
         {
             "event": "state_changed",
             "listener_count": 0
+        },
+        {
+            "event": "find_my",
+            "listener_count": 1
         }
     ]
+
+@router.post("/api/events/{event_type}")
+@router.post("/api/events")
+async def api_fire_event(
+    event_type: Optional[str] = "find_my",
+    payload: Optional[Dict[str, Any]] = None,
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+):
+    ev_type = event_type or (payload.get("event_type") if payload else "find_my")
+    ev_data = payload or {}
+    entity_id = ev_data.get("entity_id")
+    
+    if not entity_id:
+        raise HTTPException(status_code=400, detail="Target device entity_id is required")
+        
+    stmt = select(EntityState).where(EntityState.entity_id == entity_id)
+    res = await db.execute(stmt)
+    target_entity = res.scalar_one_or_none()
+    
+    if not target_entity:
+        raise HTTPException(status_code=404, detail="Target device entity_id not found")
+        
+    if target_entity.user_id != user.id:
+        attrs = target_entity.attributes or {}
+        if attrs.get("allow_find_my_device") is False:
+            raise HTTPException(status_code=403, detail="Find My Device is disabled for this member's device")
+            
+    ev_data["triggered_by"] = user.username
+    ev_data["device_name"] = (target_entity.attributes or {}).get("friendly_name") or entity_id
+    
+    event_obj = await event_bus.fire(ev_type, ev_data, user_id=target_entity.user_id)
+    logger.info(f"Fired Home Assistant event '{ev_type}' for entity {entity_id}")
+    return {
+        "message": f"Event {ev_type} fired for device {ev_data['device_name']}.",
+        "event": event_obj
+    }
 
 @router.get("/api/history/period")
 @router.get("/api/history/period/{timestamp}")
