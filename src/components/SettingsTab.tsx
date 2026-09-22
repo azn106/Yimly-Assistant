@@ -1,43 +1,42 @@
 import React, { useEffect, useState, useRef } from "react";
-import { UserInfo, Circle } from "../types";
-import { PWAInstallButton } from "./PWAInstallButton";
-import { CircleSelector } from "./CircleSelector";
+import QRCode from "qrcode";
+import { UserInfo, Circle, UserDevice } from "../types";
 import { MAP_STYLES } from "../lib/mapStyles";
-import { NavIcon, NavIconPackId, NAV_ICON_PACKS } from "../lib/navIcons";
+import { MapLivePreview } from "./MapLivePreview";
+import { QRScannerModal } from "./QRScannerModal";
 import {
   User,
   Users,
-  Palette,
-  Compass,
   Map as MapIcon,
   Clock,
   Bell,
-  Shield,
   Smartphone,
-  Info,
   ChevronDown,
+  ChevronUp,
   Check,
   Upload,
   Trash2,
   Camera,
   RefreshCw,
   AlertCircle,
-  Maximize2,
   LogOut,
-  HelpCircle,
-  Radio,
+  X,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Copy,
+  PlusCircle,
+  LogIn,
   Sliders,
-  Sparkles,
-  Layers,
-  Activity,
-  Battery,
-  ShieldCheck,
-  MapPin
+  Shield,
+  Radio,
+  Edit2
 } from "lucide-react";
 
 interface SettingsTabProps {
   user: UserInfo | null;
   onLogout: () => void;
+  onClose?: () => void;
   onUserUpdate?: (updated: UserInfo) => void;
   circles?: Circle[];
   selectedCircle?: Circle | null;
@@ -47,8 +46,6 @@ interface SettingsTabProps {
   onLeaveCircle?: (circleId: number) => Promise<void>;
   onDeleteCircle?: (circleId: number) => Promise<void>;
   circlesLoading?: boolean;
-  navIconPack?: NavIconPackId;
-  onSelectNavIconPack?: (pack: NavIconPackId) => void;
 }
 
 const PASTEL_PALETTE = [
@@ -69,131 +66,84 @@ const PASTEL_PALETTE = [
   { name: "Desert Sage", hex: "#ECE4DB" }
 ];
 
-interface ConnectedDevice {
-  entityId: string;
-  name: string;
-  battery: string | number;
-  lastUpdated: string;
-}
+const DEVICE_ICONS = [
+  "📱 Phone",
+  "📟 Tablet",
+  "💻 Laptop",
+  "🖥 Desktop",
+  "⌚ Watch",
+  "🚗 Car",
+  "📍 Custom"
+];
 
 export const SettingsTab: React.FC<SettingsTabProps> = ({
   user,
   onLogout,
+  onClose,
   onUserUpdate,
   circles = [],
   selectedCircle = null,
-  onSelectCircle,
   onCreateCircle,
   onJoinCircle,
   onLeaveCircle,
-  onDeleteCircle,
-  circlesLoading = false,
-  navIconPack = "classic",
-  onSelectNavIconPack
+  circlesLoading = false
 }) => {
-  const [devices, setDevices] = useState<ConnectedDevice[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [selectedColor, setSelectedColor] = useState<string | null>(user?.avatar_color || null);
-  const [savingColor, setSavingColor] = useState(false);
-  const [selectedMapStyle, setSelectedMapStyle] = useState<string>(user?.map_style || "osm");
-  const [savingMapStyle, setSavingMapStyle] = useState(false);
-  const [selectedIconSize, setSelectedIconSize] = useState<number>(user?.map_selected_icon_size || 48);
-  const [unselectedIconSize, setUnselectedIconSize] = useState<number>(user?.map_unselected_icon_size || 36);
-  const [savingIconSizes, setSavingIconSizes] = useState(false);
-
-  // Profile Picture Upload States
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [uploadingPicture, setUploadingPicture] = useState(false);
-  const [deletingPicture, setDeletingPicture] = useState(false);
-  const [pictureError, setPictureError] = useState<string | null>(null);
-  const [pictureSuccess, setPictureSuccess] = useState<string | null>(null);
-
-  // Collapsible Sections State
+  // Section Expand States (Default all collapsed)
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
-    account: true,
-    family: true,
-    appearance: false,
-    navigation: true,
-    map: true,
-    location: false,
+    account: false,
+    familyCircle: false,
+    maps: false,
+    locationHistory: false,
     notifications: false,
-    privacy: false,
-    devices: false,
-    about: false
+    devices: false
   });
 
-  // Local Appearance & Notification Preferences
-  const [themeMode, setThemeMode] = useState<string>(() => localStorage.getItem("pref_theme") || "light");
-  const [density, setDensity] = useState<string>(() => localStorage.getItem("pref_density") || "comfortable");
-  const [notifyArrival, setNotifyArrival] = useState<boolean>(() => localStorage.getItem("pref_notify_arrival") !== "false");
-  const [notifyBattery, setNotifyBattery] = useState<boolean>(() => localStorage.getItem("pref_notify_battery") !== "false");
-  const [notifySound, setNotifySound] = useState<boolean>(() => localStorage.getItem("pref_notify_sound") !== "false");
-  const [shareLocation, setShareLocation] = useState<boolean>(() => localStorage.getItem("pref_share_location") !== "false");
-  const [historyRangePref, setHistoryRangePref] = useState<string>(() => localStorage.getItem("pref_history_range") || "24h");
-
-  const toggleSection = (key: string) => {
-    setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  const toggleSection = (section: string) => {
+    setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
-  const handleExpandAll = () => {
-    setOpenSections({
-      account: true,
-      family: true,
-      appearance: true,
-      navigation: true,
-      map: true,
-      location: true,
-      notifications: true,
-      privacy: true,
-      devices: true,
-      about: true
-    });
-  };
+  // ----------------------------------------------------
+  // SECTION 1: ACCOUNT STATE
+  // ----------------------------------------------------
+  const [displayName, setDisplayName] = useState(user?.display_name || "");
+  const [username, setUsername] = useState(user?.username || "");
+  const [avatarColor, setAvatarColor] = useState(user?.avatar_color || "#E2D9F3");
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [accountSuccess, setAccountSuccess] = useState<string | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
 
-  const handleCollapseAll = () => {
-    setOpenSections({
-      account: false,
-      family: false,
-      appearance: false,
-      navigation: false,
-      map: false,
-      location: false,
-      notifications: false,
-      privacy: false,
-      devices: false,
-      about: false
-    });
-  };
+  // Photo state
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [deletingPhoto, setDeletingPhoto] = useState(false);
+
+  // Password Modal
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showCurrentPass, setShowCurrentPass] = useState(false);
+  const [showNewPass, setShowNewPass] = useState(false);
+  const [passwordLoading, setPasswordLoading] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchDevices();
-  }, []);
-
-  useEffect(() => {
-    if (user?.avatar_color) {
-      setSelectedColor(user.avatar_color);
-    }
-    if (user?.map_style) {
-      setSelectedMapStyle(user.map_style);
-    }
-    if (user?.map_selected_icon_size) {
-      setSelectedIconSize(user.map_selected_icon_size);
-    }
-    if (user?.map_unselected_icon_size) {
-      setUnselectedIconSize(user.map_unselected_icon_size);
+    if (user) {
+      setDisplayName(user.display_name || "");
+      setUsername(user.username || "");
+      setAvatarColor(user.avatar_color || "#E2D9F3");
     }
   }, [user]);
 
-  const handleUpdateIconSizes = async (newSelected: number, newUnselected: number) => {
-    setSelectedIconSize(newSelected);
-    setUnselectedIconSize(newUnselected);
-    setSavingIconSizes(true);
-    const token = localStorage.getItem("access_token");
-    if (!token) return;
+  const handleSaveAccount = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setSavingAccount(true);
+    setAccountError(null);
+    setAccountSuccess(null);
 
     try {
+      const token = localStorage.getItem("token");
       const res = await fetch("/api/auth/profile", {
         method: "PUT",
         headers: {
@@ -201,74 +151,44 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           Authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
-          map_selected_icon_size: newSelected,
-          map_unselected_icon_size: newUnselected
+          display_name: displayName.trim(),
+          username: username.trim(),
+          avatar_color: avatarColor
         })
       });
-      if (res.ok) {
-        const updatedUser = await res.json();
-        if (onUserUpdate) {
-          onUserUpdate(updatedUser);
-        }
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || "Failed to update profile");
       }
-    } catch (err) {
-      console.error("Failed to persist map icon size preferences:", err);
+
+      const updated = await res.json();
+      onUserUpdate?.(updated);
+      setAccountSuccess("Account updated successfully!");
+      setTimeout(() => setAccountSuccess(null), 3000);
+    } catch (err: any) {
+      setAccountError(err.message || "Failed to update profile");
     } finally {
-      setSavingIconSizes(false);
+      setSavingAccount(false);
     }
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setPictureError(null);
-    setPictureSuccess(null);
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const validTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
-    if (!validTypes.includes(file.type.toLowerCase())) {
-      setPictureError("Unsupported file format. Please select a JPEG, PNG, or WebP photo.");
+    if (!file.type.startsWith("image/")) {
+      setAccountError("Please select a valid image file.");
       return;
     }
 
-    if (file.size > 5 * 1024 * 1024) {
-      setPictureError("Image file size exceeds maximum limit of 5MB.");
-      return;
-    }
-
-    setSelectedFile(file);
-    const objectUrl = URL.createObjectURL(file);
-    setPreviewUrl(objectUrl);
-  };
-
-  const handleCancelPreview = () => {
-    setSelectedFile(null);
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-      setPreviewUrl(null);
-    }
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-    setPictureError(null);
-  };
-
-  const handleUploadPicture = async () => {
-    if (!selectedFile) return;
-
-    setUploadingPicture(true);
-    setPictureError(null);
-    setPictureSuccess(null);
-
-    const token = localStorage.getItem("access_token");
-    if (!token) {
-      setPictureError("Authentication required.");
-      setUploadingPicture(false);
-      return;
-    }
+    setUploadingPhoto(true);
+    setAccountError(null);
 
     try {
       const formData = new FormData();
-      formData.append("file", selectedFile);
+      formData.append("picture", file);
+      const token = localStorage.getItem("token");
 
       const res = await fetch("/api/auth/profile/picture", {
         method: "POST",
@@ -278,37 +198,29 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         body: formData
       });
 
-      if (res.ok) {
-        const updatedUser = await res.json();
-        setPictureSuccess("Profile picture updated successfully!");
-        handleCancelPreview();
-        if (onUserUpdate) {
-          onUserUpdate(updatedUser);
-        }
-      } else {
-        const errorData = await res.json().catch(() => ({}));
-        setPictureError(errorData.detail || "Failed to upload profile picture.");
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || "Failed to upload photo");
       }
-    } catch (err) {
-      setPictureError("Network error uploading profile picture.");
+
+      const updated = await res.json();
+      onUserUpdate?.(updated);
+      setAccountSuccess("Profile photo updated!");
+      setTimeout(() => setAccountSuccess(null), 3000);
+    } catch (err: any) {
+      setAccountError(err.message || "Failed to upload profile photo");
     } finally {
-      setUploadingPicture(false);
+      setUploadingPhoto(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
 
-  const handleRemovePicture = async () => {
-    setDeletingPicture(true);
-    setPictureError(null);
-    setPictureSuccess(null);
-
-    const token = localStorage.getItem("access_token");
-    if (!token) {
-      setPictureError("Authentication required.");
-      setDeletingPicture(false);
-      return;
-    }
+  const handleDeletePhoto = async () => {
+    setDeletingPhoto(true);
+    setAccountError(null);
 
     try {
+      const token = localStorage.getItem("token");
       const res = await fetch("/api/auth/profile/picture", {
         method: "DELETE",
         headers: {
@@ -316,927 +228,898 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         }
       });
 
-      if (res.ok) {
-        const updatedUser = await res.json();
-        setPictureSuccess("Profile picture removed. Restored avatar initial.");
-        handleCancelPreview();
-        if (onUserUpdate) {
-          onUserUpdate(updatedUser);
-        }
-      } else {
-        const errorData = await res.json().catch(() => ({}));
-        setPictureError(errorData.detail || "Failed to remove profile picture.");
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || "Failed to remove photo");
       }
-    } catch (err) {
-      setPictureError("Network error removing profile picture.");
+
+      const updated = await res.json();
+      onUserUpdate?.(updated);
+      setAccountSuccess("Profile photo removed!");
+      setTimeout(() => setAccountSuccess(null), 3000);
+    } catch (err: any) {
+      setAccountError(err.message || "Failed to remove photo");
     } finally {
-      setDeletingPicture(false);
+      setDeletingPhoto(false);
     }
   };
 
-  const handleSelectMapStyle = async (styleId: string) => {
-    setSelectedMapStyle(styleId);
-    setSavingMapStyle(true);
-    const token = localStorage.getItem("access_token");
-    if (!token) return;
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordError(null);
+    setPasswordSuccess(null);
+
+    if (newPassword.length < 6) {
+      setPasswordError("New password must be at least 6 characters.");
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setPasswordError("New passwords do not match.");
+      return;
+    }
+
+    setPasswordLoading(true);
 
     try {
+      const token = localStorage.getItem("token");
+      const res = await fetch("/api/auth/password", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Failed to update password");
+      }
+
+      setPasswordSuccess("Password changed successfully!");
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setTimeout(() => {
+        setShowPasswordModal(false);
+        setPasswordSuccess(null);
+      }, 1500);
+    } catch (err: any) {
+      setPasswordError(err.message || "Failed to change password");
+    } finally {
+      setPasswordLoading(false);
+    }
+  };
+
+  // ----------------------------------------------------
+  // SECTION 2: FAMILY CIRCLE STATE
+  // ----------------------------------------------------
+  const [circleQrUrl, setCircleQrUrl] = useState<string | null>(null);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [showJoinModal, setShowJoinModal] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [showSwitchWarning, setShowSwitchWarning] = useState<"join" | "create" | null>(null);
+  const [showQRScanner, setShowQRScanner] = useState(false);
+
+  const [inviteCodeInput, setInviteCodeInput] = useState("");
+  const [newCircleNameInput, setNewCircleNameInput] = useState("");
+  const [circleActionLoading, setCircleActionLoading] = useState(false);
+  const [circleActionError, setCircleActionError] = useState<string | null>(null);
+
+  // Generate QR Code when selectedCircle changes
+  useEffect(() => {
+    if (selectedCircle?.invite_code) {
+      QRCode.toDataURL(selectedCircle.invite_code, {
+        width: 220,
+        margin: 2,
+        color: {
+          dark: "#1e293b",
+          light: "#ffffff"
+        }
+      })
+        .then((url) => setCircleQrUrl(url))
+        .catch((err) => console.error("QR Generation error:", err));
+    } else {
+      setCircleQrUrl(null);
+    }
+  }, [selectedCircle?.invite_code]);
+
+  const handleCopyInviteCode = () => {
+    if (!selectedCircle?.invite_code) return;
+    navigator.clipboard.writeText(selectedCircle.invite_code);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
+  };
+
+  const handleConfirmLeave = async () => {
+    if (!selectedCircle || !onLeaveCircle) return;
+    setCircleActionLoading(true);
+    try {
+      await onLeaveCircle(selectedCircle.id);
+      setShowLeaveConfirm(false);
+    } catch (err: any) {
+      setCircleActionError(err.message || "Failed to leave circle");
+    } finally {
+      setCircleActionLoading(false);
+    }
+  };
+
+  const executeJoinCircle = async (code: string) => {
+    if (!onJoinCircle) return;
+    setCircleActionLoading(true);
+    setCircleActionError(null);
+    try {
+      await onJoinCircle(code.trim());
+      setShowJoinModal(false);
+      setShowQRScanner(false);
+      setInviteCodeInput("");
+    } catch (err: any) {
+      setCircleActionError(err.message || "Invalid invite code or failed to join");
+    } finally {
+      setCircleActionLoading(false);
+    }
+  };
+
+  const executeCreateCircle = async () => {
+    if (!onCreateCircle || !newCircleNameInput.trim()) return;
+    setCircleActionLoading(true);
+    setCircleActionError(null);
+    try {
+      await onCreateCircle(newCircleNameInput.trim());
+      setShowCreateModal(false);
+      setNewCircleNameInput("");
+    } catch (err: any) {
+      setCircleActionError(err.message || "Failed to create circle");
+    } finally {
+      setCircleActionLoading(false);
+    }
+  };
+
+  // ----------------------------------------------------
+  // SECTION 3: MAPS STATE
+  // ----------------------------------------------------
+  const [mapStyle, setMapStyle] = useState<string>(user?.map_style || "osm");
+  const [selectedIconSize, setSelectedIconSize] = useState<number>(
+    user?.map_selected_icon_size || 48
+  );
+  const [unselectedIconSize, setUnselectedIconSize] = useState<number>(
+    user?.map_unselected_icon_size || 36
+  );
+
+  useEffect(() => {
+    if (user?.map_style) setMapStyle(user.map_style);
+    if (user?.map_selected_icon_size) setSelectedIconSize(user.map_selected_icon_size);
+    if (user?.map_unselected_icon_size) setUnselectedIconSize(user.map_unselected_icon_size);
+  }, [user]);
+
+  // Persist Maps settings
+  const persistMapPreferences = async (updates: {
+    map_style?: string;
+    map_selected_icon_size?: number;
+    map_unselected_icon_size?: number;
+  }) => {
+    try {
+      const token = localStorage.getItem("token");
       const res = await fetch("/api/auth/profile", {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify({ map_style: styleId })
+        body: JSON.stringify(updates)
       });
       if (res.ok) {
-        const updatedUser = await res.json();
-        if (onUserUpdate) {
-          onUserUpdate(updatedUser);
-        }
+        const updated = await res.json();
+        onUserUpdate?.(updated);
       }
     } catch (err) {
-      console.error("Failed to persist map style preference:", err);
-    } finally {
-      setSavingMapStyle(false);
+      console.error("Failed to persist map preference:", err);
     }
   };
 
-  const handleSelectColor = async (colorHex: string) => {
-    setSelectedColor(colorHex);
-    setSavingColor(true);
-    const token = localStorage.getItem("access_token");
-    if (!token) return;
+  const handleMapStyleChange = (newStyle: string) => {
+    setMapStyle(newStyle);
+    persistMapPreferences({ map_style: newStyle });
+  };
 
+  const handleSelectedIconSizeChange = (size: number) => {
+    setSelectedIconSize(size);
+    persistMapPreferences({ map_selected_icon_size: size });
+  };
+
+  const handleUnselectedIconSizeChange = (size: number) => {
+    setUnselectedIconSize(size);
+    persistMapPreferences({ map_unselected_icon_size: size });
+  };
+
+  // ----------------------------------------------------
+  // SECTION 4: LOCATION & HISTORY STATE
+  // ----------------------------------------------------
+  const [shareLocation, setShareLocation] = useState<boolean>(
+    user?.share_location !== false
+  );
+  const [saveLocationHistory, setSaveLocationHistory] = useState<boolean>(
+    user?.save_location_history !== false
+  );
+  const [historyRetention, setHistoryRetention] = useState<string>(
+    user?.history_retention || "30d"
+  );
+  const [locationUpdateFreq, setLocationUpdateFreq] = useState<string>(
+    user?.location_update_frequency || "realtime"
+  );
+
+  useEffect(() => {
+    if (user) {
+      setShareLocation(user.share_location !== false);
+      setSaveLocationHistory(user.save_location_history !== false);
+      setHistoryRetention(user.history_retention || "30d");
+      setLocationUpdateFreq(user.location_update_frequency || "realtime");
+    }
+  }, [user]);
+
+  const persistLocationSettings = async (updates: {
+    share_location?: boolean;
+    save_location_history?: boolean;
+    history_retention?: string;
+    location_update_frequency?: string;
+  }) => {
     try {
+      const token = localStorage.getItem("token");
       const res = await fetch("/api/auth/profile", {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify({ avatar_color: colorHex })
+        body: JSON.stringify(updates)
       });
       if (res.ok) {
-        const updatedUser = await res.json();
-        if (onUserUpdate) {
-          onUserUpdate(updatedUser);
-        }
+        const updated = await res.json();
+        onUserUpdate?.(updated);
       }
     } catch (err) {
-      console.error("Failed to persist avatar color:", err);
-    } finally {
-      setSavingColor(false);
+      console.error("Failed to persist location setting:", err);
     }
   };
+
+  // ----------------------------------------------------
+  // SECTION 5: NOTIFICATIONS STATE
+  // ----------------------------------------------------
+  const [notifyPush, setNotifyPush] = useState<boolean>(user?.notify_push !== false);
+  const [notifyArrivalDeparture, setNotifyArrivalDeparture] = useState<boolean>(
+    user?.notify_arrival_departure !== false
+  );
+  const [notifyStopSharing, setNotifyStopSharing] = useState<boolean>(
+    user?.notify_stop_sharing !== false
+  );
+  const [notifyLowBattery, setNotifyLowBattery] = useState<boolean>(
+    user?.notify_low_battery !== false
+  );
+  const [notifyDeviceOffline, setNotifyDeviceOffline] = useState<boolean>(
+    user?.notify_device_offline !== false
+  );
+
+  useEffect(() => {
+    if (user) {
+      setNotifyPush(user.notify_push !== false);
+      setNotifyArrivalDeparture(user.notify_arrival_departure !== false);
+      setNotifyStopSharing(user.notify_stop_sharing !== false);
+      setNotifyLowBattery(user.notify_low_battery !== false);
+      setNotifyDeviceOffline(user.notify_device_offline !== false);
+    }
+  }, [user]);
+
+  const persistNotificationSetting = async (updates: {
+    notify_push?: boolean;
+    notify_arrival_departure?: boolean;
+    notify_stop_sharing?: boolean;
+    notify_low_battery?: boolean;
+    notify_device_offline?: boolean;
+  }) => {
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch("/api/auth/profile", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify(updates)
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        onUserUpdate?.(updated);
+      }
+    } catch (err) {
+      console.error("Failed to persist notification setting:", err);
+    }
+  };
+
+  // ----------------------------------------------------
+  // SECTION 6: DEVICES STATE
+  // ----------------------------------------------------
+  const [devicesList, setDevicesList] = useState<UserDevice[]>([]);
+  const [devicesLoading, setDevicesLoading] = useState(false);
+  const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
+  const [editDeviceName, setEditDeviceName] = useState("");
 
   const fetchDevices = async () => {
-    setLoading(true);
-    const token = localStorage.getItem("access_token");
-    if (!token) return;
-
+    setDevicesLoading(true);
     try {
-      const res = await fetch("/api/states", {
+      const token = localStorage.getItem("token");
+      const res = await fetch("/api/devices", {
         headers: {
           Authorization: `Bearer ${token}`
         }
       });
       if (res.ok) {
         const data = await res.json();
-        const trackerDevices = data
-          .filter((entity: any) => entity.entity_id.startsWith("device_tracker."))
-          .map((entity: any) => ({
-            entityId: entity.entity_id,
-            name: entity.attributes?.friendly_name || entity.entity_id.replace("device_tracker.", ""),
-            battery: entity.attributes?.battery_level || "100",
-            lastUpdated: new Date(entity.last_updated).toLocaleString()
-          }));
-        setDevices(trackerDevices);
+        setDevicesList(data);
       }
     } catch (err) {
-      console.error("Error retrieving device states:", err);
+      console.error("Failed to fetch user devices:", err);
     } finally {
-      setLoading(false);
+      setDevicesLoading(false);
     }
   };
 
-  const serverOrigin = window.location.origin;
+  useEffect(() => {
+    fetchDevices();
+  }, []);
+
+  const handleUpdateDevice = async (
+    entityId: string,
+    updates: { name?: string; location_visibility?: "family" | "me_only"; map_icon?: string }
+  ) => {
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(`/api/devices/${encodeURIComponent(entityId)}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify(updates)
+      });
+
+      if (res.ok) {
+        const updatedDevice = await res.json();
+        setDevicesList((prev) =>
+          prev.map((d) => (d.entity_id === entityId ? updatedDevice : d))
+        );
+        setEditingDeviceId(null);
+      }
+    } catch (err) {
+      console.error("Failed to update device:", err);
+    }
+  };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-4 pb-12">
-      {/* Top Header & Expand / Collapse Controls */}
-      <div className="flex items-center justify-between px-2 pt-1 pb-2">
-        <div>
-          <h1 className="text-xl font-black text-slate-900 tracking-tight">System Settings</h1>
-          <p className="text-xs text-slate-400 font-semibold mt-0.5">
-            Manage your account, Family Circles, navigation icon packs, map preferences, and telemetry.
-          </p>
+    <div className="w-full text-slate-800 pb-12 font-sans selection:bg-indigo-100">
+      {/* Top Header Bar matching requested title styling */}
+      <div className="flex items-center justify-between pb-6 mb-8 border-b border-slate-200/60 -mx-6 md:-mx-8 px-6 md:px-8">
+        {/* Flush left edge, rounded right edge title */}
+        <div
+          id="settings-title"
+          className="h-10 px-5 pl-4.5 bg-white/85 backdrop-blur-2xl border-y border-r border-white/80 shadow-[0_4px_20px_rgba(0,0,0,0.08)] flex items-center rounded-r-full select-none text-left focus:outline-none text-slate-800 -ml-6 md:-ml-8"
+        >
+          <span className="text-sm font-black tracking-wide">SETTINGS</span>
         </div>
-        <div className="flex items-center gap-2">
+
+        {/* Top-Right Action Controls */}
+        <div className="flex items-center gap-2.5">
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              id="back-to-map-button"
+              className="h-10 px-3.5 rounded-full bg-white/80 hover:bg-slate-100 text-slate-600 hover:text-slate-900 border border-slate-200/80 shadow-xs text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+              title="Return to live map"
+            >
+              <X className="w-4 h-4" />
+              <span className="hidden sm:inline">Back to Map</span>
+            </button>
+          )}
+
           <button
             type="button"
-            onClick={handleExpandAll}
-            className="text-[11px] font-bold text-slate-600 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-200 px-3 py-1.5 rounded-full shadow-xs transition cursor-pointer"
+            onClick={onLogout}
+            id="logout-button"
+            className="h-10 px-4 rounded-full bg-white/80 hover:bg-rose-50 text-slate-700 hover:text-rose-600 border border-slate-200/80 shadow-xs text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+            title="Log out of current account"
           >
-            Expand All
-          </button>
-          <button
-            type="button"
-            onClick={handleCollapseAll}
-            className="text-[11px] font-bold text-slate-600 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-200 px-3 py-1.5 rounded-full shadow-xs transition cursor-pointer"
-          >
-            Collapse All
+            <LogOut className="w-3.5 h-3.5 text-rose-500" />
+            <span>Logout</span>
           </button>
         </div>
       </div>
 
-      {/* ========================================================================= */}
+      {/* ======================================================== */}
       {/* 1. ACCOUNT SECTION */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
+      {/* ======================================================== */}
+      <div
+        id="section-account"
+        className="bg-white/80 backdrop-blur-xl border border-white/90 shadow-[0_4px_24px_rgba(0,0,0,0.03)] rounded-3xl p-5 md:p-6 mb-6 transition-all"
+      >
         <button
           type="button"
           onClick={() => toggleSection("account")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
+          className="w-full flex items-center justify-between text-left focus:outline-none cursor-pointer select-none"
         >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <User className="w-5 h-5" />
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-sm">
+              <User className="w-4.5 h-4.5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-800">Account</h2>
-                <span className="text-[10px] font-extrabold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100/60">
-                  {user?.display_name || "Profile"}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                Profile details, avatar photo, and pastel ring accents
-              </p>
+              <h2 className="text-base font-black tracking-tight text-slate-800">1. Account</h2>
+              <p className="text-xs text-slate-400 font-medium">Profile details, avatar color, and credentials</p>
             </div>
           </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.account ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
+          <div className="p-1 text-slate-400 hover:text-slate-600 transition">
+            {openSections.account ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
           </div>
         </button>
 
         {openSections.account && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-6">
-            {/* Profile Info Summary Header */}
-            <div className="p-5 rounded-2xl bg-slate-50/50 border border-slate-100/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4 mt-2">
+          <div className="mt-6 pt-5 border-t border-slate-100/90 space-y-6">
+            {/* Feedback notifications */}
+            {accountSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl text-xs font-semibold flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{accountSuccess}</span>
+              </div>
+            )}
+            {accountError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{accountError}</span>
+              </div>
+            )}
+
+            {/* Profile Photo Row */}
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-2xl bg-slate-50/70 border border-slate-100">
               <div className="flex items-center gap-4">
                 <div
-                  className="h-16 w-16 text-white font-extrabold text-xl rounded-full flex items-center justify-center select-none shadow-sm transition-all duration-300 relative overflow-hidden shrink-0"
-                  style={{
-                    backgroundColor: selectedColor || "#4f46e5",
-                    border: "3px solid white",
-                    boxShadow: `0 0 0 3px ${selectedColor || "#4f46e5"}`
-                  }}
+                  className="w-16 h-16 rounded-full flex items-center justify-center text-white font-black text-xl shadow-sm border-2 border-white overflow-hidden shrink-0"
+                  style={{ backgroundColor: avatarColor }}
                 >
-                  {previewUrl || user?.profile_picture_url ? (
+                  {user?.profile_picture_url ? (
                     <img
-                      src={previewUrl || user?.profile_picture_url || ""}
-                      alt={user?.display_name || "Profile"}
+                      src={user.profile_picture_url}
+                      alt={displayName}
                       className="w-full h-full object-cover rounded-full"
                     />
-                  ) : user?.display_name ? (
-                    user.display_name.charAt(0).toUpperCase()
                   ) : (
-                    "U"
+                    <span>{(displayName || username || "U").charAt(0).toUpperCase()}</span>
                   )}
                 </div>
                 <div>
-                  <p className="text-base font-bold text-slate-800">{user?.display_name}</p>
-                  <p className="text-xs text-slate-400 font-bold mt-0.5">Username: {user?.username}</p>
-                  {user?.profile_picture_url && !previewUrl && (
-                    <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 font-bold mt-1">
-                      <Check className="w-3 h-3" /> Photo Saved
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div>
-                <span className="inline-flex items-center rounded-lg bg-indigo-50 px-3 py-1 text-[10px] font-extrabold text-indigo-700 ring-1 ring-inset ring-indigo-700/10 uppercase tracking-wider">
-                  Administrator
-                </span>
-              </div>
-            </div>
-
-            {/* Profile Picture Upload Section */}
-            <div className="space-y-4">
-              <div>
-                <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                  <Camera className="w-4 h-4 text-indigo-600" />
-                  Profile Photo
-                </h3>
-                <p className="text-[11px] text-slate-400 font-semibold mt-0.5 leading-relaxed">
-                  Upload a photo to represent yourself on the live map and Family Circles. Photos are securely stored on the server.
-                </p>
-              </div>
-
-              {pictureError && (
-                <div className="p-3 rounded-2xl bg-rose-50 border border-rose-100 flex items-center gap-2 text-rose-700 text-xs font-bold">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>{pictureError}</span>
-                </div>
-              )}
-
-              {pictureSuccess && (
-                <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center gap-2 text-emerald-700 text-xs font-bold">
-                  <Check className="w-4 h-4 shrink-0" />
-                  <span>{pictureSuccess}</span>
-                </div>
-              )}
-
-              <input
-                type="file"
-                ref={fileInputRef}
-                accept="image/jpeg,image/png,image/webp"
-                onChange={handleFileSelect}
-                className="hidden"
-              />
-
-              <div className="flex flex-wrap items-center gap-3">
-                {!previewUrl ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white rounded-xl text-xs font-bold shadow-sm transition cursor-pointer"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      {user?.profile_picture_url ? "Replace Photo" : "Upload Photo"}
-                    </button>
-
-                    {user?.profile_picture_url && (
-                      <button
-                        type="button"
-                        onClick={handleRemovePicture}
-                        disabled={deletingPicture}
-                        className="flex items-center gap-2 px-4 py-2 bg-rose-50 hover:bg-rose-100/80 active:bg-rose-200 text-rose-700 border border-rose-100 rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-50"
-                      >
-                        {deletingPicture ? (
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="w-3.5 h-3.5 text-rose-500" />
-                        )}
-                        Remove Photo
-                      </button>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleUploadPicture}
-                      disabled={uploadingPicture}
-                      className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-xl text-xs font-bold shadow-sm transition cursor-pointer disabled:opacity-50"
-                    >
-                      {uploadingPicture ? (
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Check className="w-3.5 h-3.5" />
-                      )}
-                      Save New Photo
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handleCancelPreview}
-                      disabled={uploadingPicture}
-                      className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition cursor-pointer"
-                    >
-                      Cancel
-                    </button>
-                  </>
-                )}
-
-                <span className="text-[10px] text-slate-400 font-bold">
-                  Supported: JPEG, PNG, WebP (Max 5MB)
-                </span>
-              </div>
-            </div>
-
-            {/* Avatar Ring Color Picker */}
-            <div className="border-t border-slate-100/80 pt-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xs font-bold text-slate-700">Customize Avatar Ring Accent</h3>
-                  <p className="text-[10px] text-slate-400 font-bold mt-0.5">
-                    Select a pastel theme to border your photo or avatar initial across all devices.
+                  <h3 className="text-sm font-bold text-slate-800">Profile Photo</h3>
+                  <p className="text-xs text-slate-400 font-medium mt-0.5">
+                    Visible to your circle members on the map
                   </p>
                 </div>
-                {savingColor && (
-                  <span className="text-[10px] font-bold text-indigo-600 animate-pulse">
-                    Saving accent...
-                  </span>
-                )}
               </div>
 
-              <div className="grid grid-cols-5 gap-2.5 sm:grid-cols-8 md:grid-cols-15 pt-1">
-                {PASTEL_PALETTE.map((item) => {
-                  const isSelected = selectedColor === item.hex;
-                  return (
-                    <button
-                      key={item.hex}
-                      type="button"
-                      title={item.name}
-                      onClick={() => handleSelectColor(item.hex)}
-                      className="relative h-8 w-8 rounded-full border cursor-pointer transition-all duration-200 hover:scale-110 active:scale-95 flex items-center justify-center shadow-sm"
-                      style={{
-                        backgroundColor: item.hex,
-                        borderColor: isSelected ? "#4f46e5" : "rgba(0,0,0,0.06)",
-                        borderWidth: isSelected ? "2px" : "1px",
-                        boxShadow: isSelected ? `0 0 8px ${item.hex}` : "none"
-                      }}
-                    >
-                      {isSelected && (
-                        <div className="w-1.5 h-1.5 bg-slate-700 rounded-full" />
-                      )}
-                    </button>
-                  );
-                })}
+              <div className="flex items-center gap-2">
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handlePhotoUpload}
+                  accept="image/*"
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadingPhoto}
+                  id="change-photo-btn"
+                  className="px-4 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold border border-slate-200/80 shadow-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {uploadingPhoto ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                  <span>{user?.profile_picture_url ? "Change Photo" : "Upload Photo"}</span>
+                </button>
+
+                {user?.profile_picture_url && (
+                  <button
+                    type="button"
+                    onClick={handleDeletePhoto}
+                    disabled={deletingPhoto}
+                    id="remove-photo-btn"
+                    className="p-2 rounded-xl bg-white hover:bg-rose-50 text-rose-600 border border-slate-200/80 shadow-xs transition cursor-pointer disabled:opacity-50"
+                    title="Remove custom photo"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
               </div>
             </div>
+
+            {/* Form Fields: Display Name & Username */}
+            <form onSubmit={handleSaveAccount} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                    Display Name
+                  </label>
+                  <input
+                    type="text"
+                    id="account-display-name-input"
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    placeholder="e.g. Sarah Connor"
+                    className="w-full px-3.5 py-2.5 bg-white border border-slate-200/80 rounded-xl text-sm font-medium text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 shadow-xs transition"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    id="account-username-input"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="e.g. sarah"
+                    className="w-full px-3.5 py-2.5 bg-white border border-slate-200/80 rounded-xl text-sm font-medium text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 shadow-xs transition"
+                    required
+                  />
+                </div>
+              </div>
+
+              {/* Avatar Colour Palette */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                  Colour
+                </label>
+                <div className="flex flex-wrap gap-2.5 items-center">
+                  {PASTEL_PALETTE.map((c) => {
+                    const isSelected = avatarColor.toLowerCase() === c.hex.toLowerCase();
+                    return (
+                      <button
+                        key={c.hex}
+                        type="button"
+                        onClick={() => setAvatarColor(c.hex)}
+                        className={`w-7 h-7 rounded-full transition-transform duration-150 flex items-center justify-center cursor-pointer shadow-xs border ${
+                          isSelected
+                            ? "ring-2 ring-indigo-600 ring-offset-2 scale-110 border-indigo-400"
+                            : "hover:scale-105 border-black/10"
+                        }`}
+                        style={{ backgroundColor: c.hex }}
+                        title={c.name}
+                      >
+                        {isSelected && <Check className="w-3.5 h-3.5 text-slate-800" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Password Action Row */}
+              <div className="pt-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-t border-slate-100">
+                <div>
+                  <span className="text-xs font-bold text-slate-700 block">Password</span>
+                  <span className="text-[11px] text-slate-400">Keep your login credentials secure</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPasswordModal(true)}
+                  id="open-password-modal-btn"
+                  className="px-3.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Change password →</span>
+                </button>
+              </div>
+
+              {/* Save Changes Button */}
+              <div className="pt-2 flex justify-end">
+                <button
+                  type="submit"
+                  disabled={savingAccount}
+                  id="save-account-changes-btn"
+                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:scale-98 text-white font-bold text-xs shadow-sm transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {savingAccount ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                  <span>Save Changes</span>
+                </button>
+              </div>
+            </form>
           </div>
         )}
       </div>
 
-      {/* ========================================================================= */}
-      {/* 2. FAMILY / CIRCLE SECTION */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
+      {/* ======================================================== */}
+      {/* 2. FAMILY CIRCLE SECTION */}
+      {/* ======================================================== */}
+      <div
+        id="section-family-circle"
+        className="bg-white/80 backdrop-blur-xl border border-white/90 shadow-[0_4px_24px_rgba(0,0,0,0.03)] rounded-3xl p-5 md:p-6 mb-6 transition-all"
+      >
         <button
           type="button"
-          onClick={() => toggleSection("family")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
+          onClick={() => toggleSection("familyCircle")}
+          className="w-full flex items-center justify-between text-left focus:outline-none cursor-pointer select-none"
         >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <Users className="w-5 h-5" />
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-sm">
+              <Users className="w-4.5 h-4.5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-800">Family / Circle</h2>
-                {selectedCircle && (
-                  <span className="text-[10px] font-extrabold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100/60">
-                    {selectedCircle.name}
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                Switch active circles, share invite codes, create and manage family groups
-              </p>
+              <h2 className="text-base font-black tracking-tight text-slate-800">2. Family Circle</h2>
+              <p className="text-xs text-slate-400 font-medium">Shared private map circle, QR code, and invites</p>
             </div>
           </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.family ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
+          <div className="p-1 text-slate-400 hover:text-slate-600 transition">
+            {openSections.familyCircle ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
           </div>
         </button>
 
-        {openSections.family && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-4">
-            <p className="text-xs text-slate-400 font-semibold leading-relaxed pt-2">
-              Family Circles allow your loved ones to securely share live location telemetry, place alerts, and status.
-            </p>
+        {openSections.familyCircle && (
+          <div className="mt-6 pt-5 border-t border-slate-100/90">
+            {circleActionError && (
+              <div className="mb-4 p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{circleActionError}</span>
+              </div>
+            )}
 
-            {onSelectCircle && onCreateCircle && onJoinCircle ? (
-              <div className="pt-1">
-                <CircleSelector
-                  user={user}
-                  circles={circles}
-                  selectedCircle={selectedCircle}
-                  onSelectCircle={onSelectCircle}
-                  onCreateCircle={onCreateCircle}
-                  onJoinCircle={onJoinCircle}
-                  onLeaveCircle={onLeaveCircle}
-                  onDeleteCircle={onDeleteCircle}
-                  loading={circlesLoading}
-                />
+            {!selectedCircle ? (
+              /* Case 1: User has NO circle */
+              <div className="text-center py-6 px-4 bg-slate-50/70 rounded-2xl border border-slate-100">
+                <Users className="w-10 h-10 text-slate-400 mx-auto mb-2 opacity-60" />
+                <h3 className="text-sm font-bold text-slate-800">No Family Circle Joined</h3>
+                <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-5">
+                  Join an existing family circle using an invite code or create your own circle to share real-time location.
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowCreateModal(true)}
+                    id="create-circle-btn"
+                    className="px-4.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-2 cursor-pointer"
+                  >
+                    <PlusCircle className="w-4 h-4" />
+                    <span>Create Circle</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowJoinModal(true)}
+                    id="join-circle-btn"
+                    className="px-4.5 py-2.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs border border-slate-200/80 shadow-xs transition flex items-center gap-2 cursor-pointer"
+                  >
+                    <LogIn className="w-4 h-4" />
+                    <span>Join Circle</span>
+                  </button>
+                </div>
               </div>
             ) : (
-              <p className="text-xs text-slate-400">Circle management available when signed in.</p>
+              /* Case 2: User is IN a circle */
+              <div className="space-y-6">
+                {/* Circle Name Header */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-4 rounded-2xl bg-indigo-50/50 border border-indigo-100/50">
+                  <div>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600 block">
+                      Active Circle
+                    </span>
+                    <h3 className="text-lg font-black text-slate-800 mt-0.5">{selectedCircle.name}</h3>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowLeaveConfirm(true)}
+                      id="leave-circle-btn"
+                      className="px-3.5 py-2 rounded-xl bg-white hover:bg-rose-50 text-rose-600 border border-rose-200/70 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Leave Circle</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* QR Code & Invite Code Display */}
+                <div className="flex flex-col md:flex-row items-center justify-center gap-8 p-6 rounded-2xl bg-slate-50/60 border border-slate-100">
+                  {/* QR Code card */}
+                  <div className="flex flex-col items-center">
+                    <div className="p-3.5 bg-white rounded-2xl shadow-sm border border-slate-200/70 inline-block">
+                      {circleQrUrl ? (
+                        <img
+                          src={circleQrUrl}
+                          alt="Circle Invite QR Code"
+                          className="w-44 h-44 object-contain rounded-lg"
+                        />
+                      ) : (
+                        <div className="w-44 h-44 bg-slate-100 animate-pulse rounded-lg flex items-center justify-center text-xs text-slate-400">
+                          Generating QR...
+                        </div>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-slate-400 font-semibold mt-2.5">
+                      Scan with Yimly to join instantly
+                    </span>
+                  </div>
+
+                  {/* Invite Code card */}
+                  <div className="flex flex-col items-center md:items-start text-center md:text-left space-y-3">
+                    <div>
+                      <span className="text-xs font-bold text-slate-500 uppercase tracking-wider block">
+                        Invite Code
+                      </span>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-2xl font-mono font-black tracking-widest text-slate-800 bg-white px-4 py-1.5 rounded-xl border border-slate-200 shadow-xs select-all">
+                          {selectedCircle.invite_code}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleCopyInviteCode}
+                          id="copy-invite-code-btn"
+                          className="p-2.5 rounded-xl bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 shadow-xs transition cursor-pointer"
+                          title="Copy invite code"
+                        >
+                          {copiedCode ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <p className="text-xs text-slate-500 max-w-xs leading-relaxed">
+                      Share this code or QR code with family members to invite them to{" "}
+                      <span className="font-bold text-slate-700">{selectedCircle.name}</span>.
+                    </p>
+
+                    {/* Switch Circle options */}
+                    <div className="pt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowSwitchWarning("join")}
+                        id="switch-join-btn"
+                        className="px-3.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold border border-slate-200 transition cursor-pointer"
+                      >
+                        Join Another Circle
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowSwitchWarning("create")}
+                        id="switch-create-btn"
+                        className="px-3.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold border border-slate-200 transition cursor-pointer"
+                      >
+                        Create Another Circle
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             )}
           </div>
         )}
       </div>
 
-      {/* ========================================================================= */}
-      {/* 3. APPEARANCE SECTION */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
+      {/* ======================================================== */}
+      {/* 3. MAPS SECTION */}
+      {/* ======================================================== */}
+      <div
+        id="section-maps"
+        className="bg-white/80 backdrop-blur-xl border border-white/90 shadow-[0_4px_24px_rgba(0,0,0,0.03)] rounded-3xl p-5 md:p-6 mb-6 transition-all"
+      >
         <button
           type="button"
-          onClick={() => toggleSection("appearance")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
+          onClick={() => toggleSection("maps")}
+          className="w-full flex items-center justify-between text-left focus:outline-none cursor-pointer select-none"
         >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <Palette className="w-5 h-5" />
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-sm">
+              <MapIcon className="w-4.5 h-4.5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-800">Appearance</h2>
-                <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full capitalize">
-                  {themeMode}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                Application theme, density, and frosted glass visual styling
-              </p>
+              <h2 className="text-base font-black tracking-tight text-slate-800">3. Maps</h2>
+              <p className="text-xs text-slate-400 font-medium">Live preview, vector tile styling, and member marker sizes</p>
             </div>
           </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.appearance ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
+          <div className="p-1 text-slate-400 hover:text-slate-600 transition">
+            {openSections.maps ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
           </div>
         </button>
 
-        {openSections.appearance && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-6">
-            {/* Color Theme Selector */}
-            <div className="space-y-3 pt-2">
-              <div>
-                <h3 className="text-xs font-bold text-slate-800">Color Theme</h3>
-                <p className="text-[11px] text-slate-400 font-semibold mt-0.5">
-                  Choose your preferred contrast and aesthetic mode.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {[
-                  { id: "light", name: "Clean Light", desc: "Crisp white canvas with soft frosted glass" },
-                  { id: "system", name: "System Dynamic", desc: "Adapts automatically to device settings" },
-                  { id: "tinted", name: "Subtle Twilight", desc: "Soft low-contrast ambient dark preview" }
-                ].map((t) => {
-                  const isSelected = themeMode === t.id;
-                  return (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() => {
-                        setThemeMode(t.id);
-                        localStorage.setItem("pref_theme", t.id);
-                      }}
-                      className={`p-4 rounded-2xl border text-left transition-all duration-200 cursor-pointer flex flex-col justify-between ${
-                        isSelected
-                          ? "border-indigo-500 bg-indigo-50/30 ring-2 ring-indigo-500/20 shadow-sm"
-                          : "border-slate-100 bg-slate-50/50 hover:bg-slate-50 hover:border-slate-200"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-bold text-slate-800">{t.name}</span>
-                        {isSelected ? (
-                          <div className="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-xs">
-                            <Check className="w-3 h-3 stroke-[3]" />
-                          </div>
-                        ) : (
-                          <div className="w-5 h-5 rounded-full border border-slate-200 bg-white" />
-                        )}
-                      </div>
-                      <p className="text-[10px] text-slate-400 font-semibold">{t.desc}</p>
-                    </button>
-                  );
-                })}
-              </div>
+        {openSections.maps && (
+          <div className="mt-6 pt-5 border-t border-slate-100/90 space-y-6">
+            {/* 1. Live Map Preview (Top Half) */}
+            <div>
+              <MapLivePreview
+                styleId={mapStyle}
+                selectedIconSize={selectedIconSize}
+                unselectedIconSize={unselectedIconSize}
+                userColor={avatarColor}
+                userPhoto={user?.profile_picture_url}
+                userInitial={(displayName || username || "U").charAt(0).toUpperCase()}
+                deviceIcon={devicesList[0]?.map_icon || "📱 Phone"}
+              />
             </div>
 
-            {/* Layout Density */}
-            <div className="border-t border-slate-100/80 pt-5 space-y-3">
-              <div>
-                <h3 className="text-xs font-bold text-slate-800">Layout Density</h3>
-                <p className="text-[11px] text-slate-400 font-semibold mt-0.5">
-                  Controls spacing of member list cards and popups.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                {[
-                  { id: "comfortable", label: "Comfortable (Default)" },
-                  { id: "compact", label: "High Density Compact" }
-                ].map((d) => (
-                  <button
-                    key={d.id}
-                    type="button"
-                    onClick={() => {
-                      setDensity(d.id);
-                      localStorage.setItem("pref_density", d.id);
-                    }}
-                    className={`px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer border ${
-                      density === d.id
-                        ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                        : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
-                    }`}
+            {/* Controls (Bottom Half) */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-2">
+              {/* 2. Map Tile Style Dropdown */}
+              <div className="space-y-2">
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Map Tile Style
+                </label>
+                <div className="relative">
+                  <select
+                    id="map-style-dropdown"
+                    value={mapStyle}
+                    onChange={(e) => handleMapStyleChange(e.target.value)}
+                    className="w-full appearance-none px-3.5 py-2.5 bg-white border border-slate-200/80 rounded-xl text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 shadow-xs cursor-pointer pr-10 transition"
                   >
-                    {d.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ========================================================================= */}
-      {/* 4. NAVIGATION SECTION (ICON PACKS WITH LIVE PREVIEW) */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
-        <button
-          type="button"
-          onClick={() => toggleSection("navigation")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
-        >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <Compass className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-800">Navigation</h2>
-                <span className="text-[10px] font-extrabold text-indigo-600 bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-100/60 uppercase tracking-wide">
-                  Pack: {NAV_ICON_PACKS.find((p) => p.id === navIconPack)?.name || "Classic"}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                5 distinct navigation icon styles with instant dock preview and live application
-              </p>
-            </div>
-          </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.navigation ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
-          </div>
-        </button>
-
-        {openSections.navigation && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-4">
-            <div className="pt-2">
-              <h3 className="text-xs font-bold text-slate-800">Select Navigation Icon Pack</h3>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5 leading-relaxed">
-                Choose between 5 bespoke navigation styles. Your selection updates the bottom mobile navigation dock and desktop bar immediately.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 pt-1">
-              {NAV_ICON_PACKS.map((pack) => {
-                const isSelected = navIconPack === pack.id;
-                return (
-                  <button
-                    key={pack.id}
-                    type="button"
-                    onClick={() => onSelectNavIconPack && onSelectNavIconPack(pack.id)}
-                    className={`p-4 sm:p-5 rounded-2xl border text-left transition-all duration-200 cursor-pointer flex flex-col md:flex-row md:items-center justify-between gap-4 ${
-                      isSelected
-                        ? "border-indigo-500 bg-indigo-50/25 ring-2 ring-indigo-500/20 shadow-sm"
-                        : "border-slate-100 bg-slate-50/40 hover:bg-slate-50 hover:border-slate-200"
-                    }`}
-                  >
-                    {/* Left: Pack Name & Description */}
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <div
-                          className={`w-4 h-4 rounded-full flex items-center justify-center border transition ${
-                            isSelected
-                              ? "border-indigo-600 bg-indigo-600 text-white"
-                              : "border-slate-300 bg-white"
-                          }`}
-                        >
-                          {isSelected && <Check className="w-2.5 h-2.5 stroke-[3]" />}
-                        </div>
-                        <span className="text-sm font-bold text-slate-800">{pack.name}</span>
-                        {isSelected && (
-                          <span className="text-[10px] font-extrabold text-indigo-700 bg-indigo-100/80 px-2 py-0.5 rounded-full">
-                            Active
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-slate-400 font-semibold pl-6">{pack.description}</p>
-                    </div>
-
-                    {/* Right: Live Preview Dock */}
-                    <div className="flex items-center gap-2 sm:gap-3 bg-white/90 backdrop-blur-md px-3.5 py-2 rounded-full border border-slate-200/70 shadow-xs self-start md:self-auto shrink-0">
-                      <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mr-1">
-                        Preview
-                      </span>
-                      {(["map", "people", "places", "alerts", "settings"] as const).map((tab) => (
-                        <div
-                          key={tab}
-                          className={`p-1.5 rounded-full transition flex items-center justify-center ${
-                            tab === "map"
-                              ? isSelected
-                                ? "bg-slate-900 text-white shadow-xs"
-                                : "bg-slate-100 text-slate-800"
-                              : "text-slate-500 hover:text-slate-800"
-                          }`}
-                          title={`${pack.name} - ${tab}`}
-                        >
-                          <NavIcon tab={tab} pack={pack.id} isSelected={tab === "map"} className="w-4 h-4" />
-                        </div>
-                      ))}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ========================================================================= */}
-      {/* 5. MAP SECTION (TILES & ICON SIZING) */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
-        <button
-          type="button"
-          onClick={() => toggleSection("map")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
-        >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <MapIcon className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-800">Map</h2>
-                <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full uppercase">
-                  {selectedMapStyle}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                Map tile providers, icon sizing sliders, and live marker preview
-              </p>
-            </div>
-          </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.map ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
-          </div>
-        </button>
-
-        {openSections.map && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-6">
-            {/* Map Tile Style Selector */}
-            <div className="space-y-4 pt-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xs font-bold text-slate-800">Map Tile Style</h3>
-                  <p className="text-xs text-slate-400 font-semibold mt-0.5 leading-relaxed">
-                    Select your preferred tile map style. This preference is stored directly in your Yimly Home Core account data on the server.
-                  </p>
+                    {MAP_STYLES.map((style) => (
+                      <option key={style.id} value={style.id}>
+                        {style.name}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 </div>
-                {savingMapStyle && (
-                  <span className="text-[10px] font-bold text-indigo-600 animate-pulse">
-                    Saving preference...
+                <p className="text-[11px] text-slate-400 font-medium">
+                  {MAP_STYLES.find((s) => s.id === mapStyle)?.description || "Select street map design"}
+                </p>
+              </div>
+
+              {/* 3. Selected Member Icon Size Slider */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Selected Icon Size
+                  </label>
+                  <span className="text-xs font-black px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100 font-mono">
+                    {selectedIconSize}px
                   </span>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                {MAP_STYLES.map((style) => {
-                  const isSelected = selectedMapStyle === style.id;
-                  return (
-                    <button
-                      key={style.id}
-                      type="button"
-                      onClick={() => handleSelectMapStyle(style.id)}
-                      className={`p-4 rounded-2xl border text-left transition-all duration-200 cursor-pointer relative flex flex-col justify-between ${
-                        isSelected
-                          ? "border-indigo-500 bg-indigo-50/20 ring-2 ring-indigo-500/20 shadow-sm"
-                          : "border-slate-100 bg-slate-50/40 hover:bg-slate-50 hover:border-slate-200"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${style.previewBg}`}>
-                          {style.name}
-                        </span>
-                        {isSelected ? (
-                          <div className="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-sm">
-                            <Check className="w-3 h-3 stroke-[3]" />
-                          </div>
-                        ) : (
-                          <div className="w-5 h-5 rounded-full border border-slate-200 bg-white" />
-                        )}
-                      </div>
-                      <div>
-                        <p className="text-xs font-bold text-slate-800">{style.name}</p>
-                        <p className="text-[10px] text-slate-400 font-semibold mt-0.5">{style.description}</p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Map Location Icons Sizing */}
-            <div className="border-t border-slate-100/80 pt-6 space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                    <Maximize2 className="w-4 h-4 text-indigo-600" />
-                    Map Location Icons Size
-                  </h3>
-                  <p className="text-xs text-slate-400 font-semibold mt-0.5 leading-relaxed">
-                    Independently customize the pixel size of selected and unselected member location icons on the map. Changes are saved server-side and update the map immediately.
-                  </p>
                 </div>
-                {savingIconSizes && (
-                  <span className="text-[10px] font-bold text-indigo-600 animate-pulse">
-                    Saving sizes...
+                <input
+                  type="range"
+                  id="selected-icon-size-slider"
+                  min={24}
+                  max={72}
+                  step={1}
+                  value={selectedIconSize}
+                  onChange={(e) => handleSelectedIconSizeChange(Number(e.target.value))}
+                  className="w-full accent-indigo-600 cursor-pointer h-2 bg-slate-200 rounded-lg"
+                />
+                <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                  <span>24px</span>
+                  <span className="text-indigo-600 font-bold">48px Default</span>
+                  <span>72px</span>
+                </div>
+              </div>
+
+              {/* 4. Unselected Member Icon Size Slider */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Unselected Icon Size
+                  </label>
+                  <span className="text-xs font-black px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200 font-mono">
+                    {unselectedIconSize}px
                   </span>
-                )}
-              </div>
-
-              {/* Sliders Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-1">
-                {/* Selected Member Icon Slider */}
-                <div className="p-5 rounded-2xl bg-slate-50/60 border border-slate-100/80 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label htmlFor="selected-icon-slider" className="text-xs font-bold text-slate-700">
-                      Selected Member Icon
-                    </label>
-                    <span className="text-xs font-extrabold px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-600 border border-indigo-100/50">
-                      {selectedIconSize} px
-                    </span>
-                  </div>
-
-                  <input
-                    id="selected-icon-slider"
-                    type="range"
-                    min="24"
-                    max="72"
-                    step="1"
-                    value={selectedIconSize}
-                    onChange={(e) => handleUpdateIconSizes(Number(e.target.value), unselectedIconSize)}
-                    className="w-full accent-indigo-600 h-2 bg-slate-200/80 rounded-lg appearance-none cursor-pointer"
-                  />
-                  <div className="flex justify-between text-[10px] text-slate-400 font-bold">
-                    <span>Small (24px)</span>
-                    <span>Default (48px)</span>
-                    <span>Large (72px)</span>
-                  </div>
                 </div>
-
-                {/* Unselected Member Icon Slider */}
-                <div className="p-5 rounded-2xl bg-slate-50/60 border border-slate-100/80 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label htmlFor="unselected-icon-slider" className="text-xs font-bold text-slate-700">
-                      Unselected Member Icon
-                    </label>
-                    <span className="text-xs font-extrabold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200/60">
-                      {unselectedIconSize} px
-                    </span>
-                  </div>
-
-                  <input
-                    id="unselected-icon-slider"
-                    type="range"
-                    min="24"
-                    max="72"
-                    step="1"
-                    value={unselectedIconSize}
-                    onChange={(e) => handleUpdateIconSizes(selectedIconSize, Number(e.target.value))}
-                    className="w-full accent-slate-700 h-2 bg-slate-200/80 rounded-lg appearance-none cursor-pointer"
-                  />
-                  <div className="flex justify-between text-[10px] text-slate-400 font-bold">
-                    <span>Small (24px)</span>
-                    <span>Default (36px)</span>
-                    <span>Large (72px)</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Live Visual Marker Preview */}
-              <div className="border-t border-slate-100 pt-4 space-y-2">
-                <span className="text-xs font-bold text-slate-700 block">Live Map Icon Preview</span>
-                <div className="p-6 rounded-2xl bg-gradient-to-br from-slate-50 to-slate-100/70 border border-slate-200/60 flex flex-wrap items-center justify-around gap-6">
-                  {/* Selected Marker Preview */}
-                  <div className="flex flex-col items-center gap-2">
-                    <div
-                      className="relative flex items-center justify-center transition-all duration-200"
-                      style={{
-                        width: `${Math.round(selectedIconSize * 1.25)}px`,
-                        height: `${Math.round(selectedIconSize * 1.25)}px`
-                      }}
-                    >
-                      <div
-                        className="absolute rounded-full transition-all duration-300"
-                        style={{
-                          width: `${Math.round(selectedIconSize * 1.25)}px`,
-                          height: `${Math.round(selectedIconSize * 1.25)}px`,
-                          backgroundColor: selectedColor || "#4f46e5",
-                          opacity: 0.35,
-                          transform: "scale(1.2)"
-                        }}
-                      />
-                      <div
-                        className="relative rounded-full border-2 sm:border-[3px] border-white shadow-lg flex items-center justify-center font-extrabold text-white overflow-hidden transition-all duration-200"
-                        style={{
-                          width: `${selectedIconSize}px`,
-                          height: `${selectedIconSize}px`,
-                          backgroundColor: selectedColor || "#4f46e5",
-                          fontSize: `${Math.max(10, Math.floor(selectedIconSize * 0.38))}px`
-                        }}
-                      >
-                        {user?.profile_picture_url ? (
-                          <img
-                            src={user.profile_picture_url}
-                            alt={user.display_name}
-                            className="w-full h-full object-cover rounded-full"
-                          />
-                        ) : (
-                          (user?.display_name || "U").charAt(0).toUpperCase()
-                        )}
-                      </div>
-                      <div
-                        className="absolute bottom-[-2px] w-0 h-0 border-solid"
-                        style={{
-                          borderLeftWidth: `${Math.max(4, Math.round(selectedIconSize * 0.15))}px`,
-                          borderLeftColor: "transparent",
-                          borderRightWidth: `${Math.max(4, Math.round(selectedIconSize * 0.15))}px`,
-                          borderRightColor: "transparent",
-                          borderTopWidth: `${Math.max(4, Math.round(selectedIconSize * 0.15))}px`,
-                          borderTopColor: "white",
-                          filter: "drop-shadow(0 2px 3px rgba(0,0,0,0.15))"
-                        }}
-                      />
-                    </div>
-                    <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-100">
-                      Selected ({selectedIconSize}px)
-                    </span>
-                  </div>
-
-                  {/* Unselected Marker Preview */}
-                  <div className="flex flex-col items-center gap-2">
-                    <div
-                      className="relative flex items-center justify-center transition-all duration-200"
-                      style={{
-                        width: `${Math.round(unselectedIconSize * 1.25)}px`,
-                        height: `${Math.round(unselectedIconSize * 1.25)}px`
-                      }}
-                    >
-                      <div
-                        className="absolute rounded-full transition-all duration-300"
-                        style={{
-                          width: `${Math.round(unselectedIconSize * 1.25)}px`,
-                          height: `${Math.round(unselectedIconSize * 1.25)}px`,
-                          backgroundColor: selectedColor || "#4f46e5",
-                          opacity: 0.2,
-                          transform: "scale(1.0)"
-                        }}
-                      />
-                      <div
-                        className="relative rounded-full border-2 sm:border-[3px] border-white shadow-md flex items-center justify-center font-extrabold text-white overflow-hidden transition-all duration-200"
-                        style={{
-                          width: `${unselectedIconSize}px`,
-                          height: `${unselectedIconSize}px`,
-                          backgroundColor: selectedColor || "#4f46e5",
-                          fontSize: `${Math.max(10, Math.floor(unselectedIconSize * 0.38))}px`
-                        }}
-                      >
-                        {user?.profile_picture_url ? (
-                          <img
-                            src={user.profile_picture_url}
-                            alt={user.display_name}
-                            className="w-full h-full object-cover rounded-full"
-                          />
-                        ) : (
-                          (user?.display_name || "U").charAt(0).toUpperCase()
-                        )}
-                      </div>
-                      <div
-                        className="absolute bottom-[-2px] w-0 h-0 border-solid"
-                        style={{
-                          borderLeftWidth: `${Math.max(4, Math.round(unselectedIconSize * 0.15))}px`,
-                          borderLeftColor: "transparent",
-                          borderRightWidth: `${Math.max(4, Math.round(unselectedIconSize * 0.15))}px`,
-                          borderRightColor: "transparent",
-                          borderTopWidth: `${Math.max(4, Math.round(unselectedIconSize * 0.15))}px`,
-                          borderTopColor: "white",
-                          filter: "drop-shadow(0 2px 3px rgba(0,0,0,0.15))"
-                        }}
-                      />
-                    </div>
-                    <span className="text-[11px] font-bold text-slate-600 bg-white px-2 py-0.5 rounded-full border border-slate-200">
-                      Unselected ({unselectedIconSize}px)
-                    </span>
-                  </div>
+                <input
+                  type="range"
+                  id="unselected-icon-size-slider"
+                  min={24}
+                  max={72}
+                  step={1}
+                  value={unselectedIconSize}
+                  onChange={(e) => handleUnselectedIconSizeChange(Number(e.target.value))}
+                  className="w-full accent-indigo-600 cursor-pointer h-2 bg-slate-200 rounded-lg"
+                />
+                <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                  <span>24px</span>
+                  <span className="text-indigo-600 font-bold">36px Default</span>
+                  <span>72px</span>
                 </div>
               </div>
             </div>
@@ -1244,470 +1127,869 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         )}
       </div>
 
-      {/* ========================================================================= */}
-      {/* 6. LOCATION & HISTORY SECTION */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
+      {/* ======================================================== */}
+      {/* 4. LOCATION & HISTORY SECTION */}
+      {/* ======================================================== */}
+      <div
+        id="section-location-history"
+        className="bg-white/80 backdrop-blur-xl border border-white/90 shadow-[0_4px_24px_rgba(0,0,0,0.03)] rounded-3xl p-5 md:p-6 mb-6 transition-all"
+      >
         <button
           type="button"
-          onClick={() => toggleSection("location")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
+          onClick={() => toggleSection("locationHistory")}
+          className="w-full flex items-center justify-between text-left focus:outline-none cursor-pointer select-none"
         >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <Clock className="w-5 h-5" />
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-sm">
+              <Clock className="w-4.5 h-4.5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-800">Location & History</h2>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                Telemetry polling frequency, historical path breadcrumbs, and retention
-              </p>
+              <h2 className="text-base font-black tracking-tight text-slate-800">4. Location & History</h2>
+              <p className="text-xs text-slate-400 font-medium">Broadcast toggles, breadcrumb logging, and data retention</p>
             </div>
           </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.location ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
+          <div className="p-1 text-slate-400 hover:text-slate-600 transition">
+            {openSections.locationHistory ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
           </div>
         </button>
 
-        {openSections.location && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-5">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-              <div className="p-4 rounded-2xl bg-slate-50/60 border border-slate-100 space-y-1">
-                <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                  <Activity className="w-4 h-4 text-emerald-600" />
-                  Live Sync Rate
-                </span>
-                <p className="text-xs text-slate-500 font-semibold">15 seconds automatic loop</p>
-                <p className="text-[10px] text-slate-400">
-                  Background polling synchronizes member positions with minimal battery impact.
+        {openSections.locationHistory && (
+          <div className="mt-6 pt-5 border-t border-slate-100/90 space-y-5">
+            {/* Control 1: Share My Location Toggle */}
+            <div className="flex items-center justify-between p-4 rounded-2xl bg-slate-50/70 border border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Share My Location</h3>
+                <p className="text-xs text-slate-400 font-medium mt-0.5">
+                  Allow members in your Family Circle to see your live position
                 </p>
               </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  id="toggle-share-location"
+                  checked={shareLocation}
+                  onChange={(e) => {
+                    const val = e.target.checked;
+                    setShareLocation(val);
+                    persistLocationSettings({ share_location: val });
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
 
-              <div className="p-4 rounded-2xl bg-slate-50/60 border border-slate-100 space-y-1">
-                <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                  <MapPin className="w-4 h-4 text-indigo-600" />
-                  History Retention
-                </span>
-                <p className="text-xs text-slate-500 font-semibold">7 Days of Path Telemetry</p>
-                <p className="text-[10px] text-slate-400">
-                  Historical routes are saved with GPS timestamps and motion indicators.
+            {/* Control 2: Save Location History Toggle */}
+            <div className="flex items-center justify-between p-4 rounded-2xl bg-slate-50/70 border border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Save Location History</h3>
+                <p className="text-xs text-slate-400 font-medium mt-0.5">
+                  Record position breadcrumbs to view routes and activity timeline
                 </p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  id="toggle-save-history"
+                  checked={saveLocationHistory}
+                  onChange={(e) => {
+                    const val = e.target.checked;
+                    setSaveLocationHistory(val);
+                    persistLocationSettings({ save_location_history: val });
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
+
+            {/* Control 3: History Retention Dropdown */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-slate-50/70 border border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">History Retention</h3>
+                <p className="text-xs text-slate-400 font-medium mt-0.5">
+                  Automatically purge historical telemetry older than this duration
+                </p>
+              </div>
+              <div className="relative min-w-[150px]">
+                <select
+                  id="dropdown-history-retention"
+                  value={historyRetention}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setHistoryRetention(val);
+                    persistLocationSettings({ history_retention: val });
+                  }}
+                  className="w-full appearance-none px-3 py-2 bg-white border border-slate-200/80 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 pr-8 shadow-xs cursor-pointer"
+                >
+                  <option value="7d">7 Days</option>
+                  <option value="30d">30 Days</option>
+                  <option value="90d">90 Days</option>
+                  <option value="1y">1 Year</option>
+                  <option value="forever">Forever</option>
+                </select>
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               </div>
             </div>
 
-            {/* Default History Timespan Preference */}
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-700 block">Default History Quick Range</label>
-              <div className="flex flex-wrap gap-2">
-                {[
-                  { id: "today", label: "Today" },
-                  { id: "24h", label: "Last 24 Hours" },
-                  { id: "7d", label: "Past 7 Days" },
-                  { id: "custom", label: "Custom Date Range" }
-                ].map((range) => (
-                  <button
-                    key={range.id}
-                    type="button"
-                    onClick={() => {
-                      setHistoryRangePref(range.id);
-                      localStorage.setItem("pref_history_range", range.id);
-                    }}
-                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer border ${
-                      historyRangePref === range.id
-                        ? "bg-indigo-600 text-white border-indigo-600 shadow-xs"
-                        : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
-                    }`}
-                  >
-                    {range.label}
-                  </button>
-                ))}
+            {/* Control 4: Location Updates Dropdown */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-slate-50/70 border border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Location Updates Frequency</h3>
+                <p className="text-xs text-slate-400 font-medium mt-0.5">
+                  Interval for companion device location telemetry sync
+                </p>
+              </div>
+              <div className="relative min-w-[150px]">
+                <select
+                  id="dropdown-location-frequency"
+                  value={locationUpdateFreq}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setLocationUpdateFreq(val);
+                    persistLocationSettings({ location_update_frequency: val });
+                  }}
+                  className="w-full appearance-none px-3 py-2 bg-white border border-slate-200/80 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 pr-8 shadow-xs cursor-pointer"
+                >
+                  <option value="realtime">Real-time</option>
+                  <option value="1m">1 minute</option>
+                  <option value="5m">5 minutes</option>
+                  <option value="15m">15 minutes</option>
+                </select>
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* ========================================================================= */}
-      {/* 7. NOTIFICATIONS SECTION */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
+      {/* ======================================================== */}
+      {/* 5. NOTIFICATIONS SECTION */}
+      {/* ======================================================== */}
+      <div
+        id="section-notifications"
+        className="bg-white/80 backdrop-blur-xl border border-white/90 shadow-[0_4px_24px_rgba(0,0,0,0.03)] rounded-3xl p-5 md:p-6 mb-6 transition-all"
+      >
         <button
           type="button"
           onClick={() => toggleSection("notifications")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
+          className="w-full flex items-center justify-between text-left focus:outline-none cursor-pointer select-none"
         >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <Bell className="w-5 h-5" />
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-sm">
+              <Bell className="w-4.5 h-4.5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-800">Notifications</h2>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                Geofence zone alerts, arrival/departure chimes, and battery warnings
-              </p>
+              <h2 className="text-base font-black tracking-tight text-slate-800">5. Notifications</h2>
+              <p className="text-xs text-slate-400 font-medium">Push alert preferences, member arrivals, and battery warnings</p>
             </div>
           </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.notifications ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
+          <div className="p-1 text-slate-400 hover:text-slate-600 transition">
+            {openSections.notifications ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
           </div>
         </button>
 
         {openSections.notifications && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-4">
-            <div className="space-y-3 pt-2">
-              {/* Arrival / Departure */}
-              <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50/60 border border-slate-100">
-                <div>
-                  <p className="text-xs font-bold text-slate-800">Place Arrival & Departure Alerts</p>
-                  <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
-                    Notify when circle members enter or leave registered zones (Home, School, Work).
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const newVal = !notifyArrival;
-                    setNotifyArrival(newVal);
-                    localStorage.setItem("pref_notify_arrival", String(newVal));
-                  }}
-                  className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
-                    notifyArrival ? "bg-indigo-600" : "bg-slate-300"
-                  }`}
-                >
-                  <span
-                    className={`block w-4 h-4 bg-white rounded-full shadow-xs transition-transform transform ${
-                      notifyArrival ? "translate-x-6" : "translate-x-1"
-                    }`}
-                  />
-                </button>
+          <div className="mt-6 pt-5 border-t border-slate-100/90 space-y-4">
+            {/* Toggle 1: Push Notifications */}
+            <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50/70 border border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Push Notifications</h3>
+                <p className="text-xs text-slate-400 font-medium mt-0.5">
+                  Master toggle for system and companion app notifications
+                </p>
               </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  id="toggle-notify-push"
+                  checked={notifyPush}
+                  onChange={(e) => {
+                    const val = e.target.checked;
+                    setNotifyPush(val);
+                    persistNotificationSetting({ notify_push: val });
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
 
-              {/* Low Battery Warning */}
-              <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50/60 border border-slate-100">
-                <div>
-                  <p className="text-xs font-bold text-slate-800">Low Battery Warnings</p>
-                  <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
-                    Alert family members when your device battery dips below 20%.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const newVal = !notifyBattery;
-                    setNotifyBattery(newVal);
-                    localStorage.setItem("pref_notify_battery", String(newVal));
-                  }}
-                  className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
-                    notifyBattery ? "bg-indigo-600" : "bg-slate-300"
-                  }`}
-                >
-                  <span
-                    className={`block w-4 h-4 bg-white rounded-full shadow-xs transition-transform transform ${
-                      notifyBattery ? "translate-x-6" : "translate-x-1"
-                    }`}
-                  />
-                </button>
+            {/* Toggle 2: Member Arrives / Leaves */}
+            <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50/70 border border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Member Arrives / Leaves</h3>
+                <p className="text-xs text-slate-400 font-medium mt-0.5">
+                  Alert when a circle member enters or leaves geofenced places
+                </p>
               </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  id="toggle-notify-arrival-departure"
+                  checked={notifyArrivalDeparture}
+                  onChange={(e) => {
+                    const val = e.target.checked;
+                    setNotifyArrivalDeparture(val);
+                    persistNotificationSetting({ notify_arrival_departure: val });
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
 
-              {/* In-App Chime Sound */}
-              <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50/60 border border-slate-100">
-                <div>
-                  <p className="text-xs font-bold text-slate-800">In-App Notification Sounds</p>
-                  <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
-                    Play a gentle audio ping when new alerts arrive in your feed.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const newVal = !notifySound;
-                    setNotifySound(newVal);
-                    localStorage.setItem("pref_notify_sound", String(newVal));
-                  }}
-                  className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
-                    notifySound ? "bg-indigo-600" : "bg-slate-300"
-                  }`}
-                >
-                  <span
-                    className={`block w-4 h-4 bg-white rounded-full shadow-xs transition-transform transform ${
-                      notifySound ? "translate-x-6" : "translate-x-1"
-                    }`}
-                  />
-                </button>
+            {/* Toggle 3: Member Stops Sharing */}
+            <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50/70 border border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Member Stops Sharing</h3>
+                <p className="text-xs text-slate-400 font-medium mt-0.5">
+                  Notify when a family member pauses or turns off location broadcast
+                </p>
               </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  id="toggle-notify-stop-sharing"
+                  checked={notifyStopSharing}
+                  onChange={(e) => {
+                    const val = e.target.checked;
+                    setNotifyStopSharing(val);
+                    persistNotificationSetting({ notify_stop_sharing: val });
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
+
+            {/* Toggle 4: Low Battery Alerts */}
+            <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50/70 border border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Low Battery Alerts</h3>
+                <p className="text-xs text-slate-400 font-medium mt-0.5">
+                  Alert when a family member device battery drops below 15%
+                </p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  id="toggle-notify-low-battery"
+                  checked={notifyLowBattery}
+                  onChange={(e) => {
+                    const val = e.target.checked;
+                    setNotifyLowBattery(val);
+                    persistNotificationSetting({ notify_low_battery: val });
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
+
+            {/* Toggle 5: Device Offline Alerts */}
+            <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50/70 border border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Device Offline Alerts</h3>
+                <p className="text-xs text-slate-400 font-medium mt-0.5">
+                  Notify when a tracker has not reported telemetry for over 2 hours
+                </p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  id="toggle-notify-device-offline"
+                  checked={notifyDeviceOffline}
+                  onChange={(e) => {
+                    const val = e.target.checked;
+                    setNotifyDeviceOffline(val);
+                    persistNotificationSetting({ notify_device_offline: val });
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
             </div>
           </div>
         )}
       </div>
 
-      {/* ========================================================================= */}
-      {/* 8. PRIVACY SECTION */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
-        <button
-          type="button"
-          onClick={() => toggleSection("privacy")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
-        >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <Shield className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-base font-bold text-slate-800">Privacy & Security</h2>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                Location sharing status, end-to-end local bridge, and data isolation
-              </p>
-            </div>
-          </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.privacy ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
-          </div>
-        </button>
-
-        {openSections.privacy && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-4">
-            <div className="space-y-3 pt-2">
-              <div className="flex items-center justify-between p-4 rounded-2xl bg-slate-50/60 border border-slate-100">
-                <div>
-                  <p className="text-xs font-bold text-slate-800">Share Live Location with Circle</p>
-                  <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
-                    Toggle to temporarily pause broadcasting your GPS position to circle members.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const newVal = !shareLocation;
-                    setShareLocation(newVal);
-                    localStorage.setItem("pref_share_location", String(newVal));
-                  }}
-                  className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
-                    shareLocation ? "bg-emerald-600" : "bg-slate-300"
-                  }`}
-                >
-                  <span
-                    className={`block w-4 h-4 bg-white rounded-full shadow-xs transition-transform transform ${
-                      shareLocation ? "translate-x-6" : "translate-x-1"
-                    }`}
-                  />
-                </button>
-              </div>
-
-              <div className="p-4 rounded-2xl bg-emerald-50/50 border border-emerald-100/80 flex items-start gap-3">
-                <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-xs font-bold text-emerald-900">Direct Home Assistant Local Bridge</p>
-                  <p className="text-[11px] text-emerald-700 mt-0.5 leading-relaxed font-semibold">
-                    Your location telemetry communicates strictly with your local Yimly Home Core server. Your coordinates are never sent to third-party ad brokers or external cloud tracking networks.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ========================================================================= */}
-      {/* 9. DEVICES SECTION (COMPANION APP GUIDE & CONNECTED DEVICES) */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
+      {/* ======================================================== */}
+      {/* 6. DEVICES SECTION */}
+      {/* ======================================================== */}
+      <div
+        id="section-devices"
+        className="bg-white/80 backdrop-blur-xl border border-white/90 shadow-[0_4px_24px_rgba(0,0,0,0.03)] rounded-3xl p-5 md:p-6 mb-6 transition-all"
+      >
         <button
           type="button"
           onClick={() => toggleSection("devices")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
+          className="w-full flex items-center justify-between text-left focus:outline-none cursor-pointer select-none"
         >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <Smartphone className="w-5 h-5" />
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-sm">
+              <Smartphone className="w-4.5 h-4.5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-800">Devices</h2>
-                <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
-                  {devices.length} Paired
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                Connected companion telemetry units and Home Assistant pairing guide
-              </p>
+              <h2 className="text-base font-black tracking-tight text-slate-800">6. Devices</h2>
+              <p className="text-xs text-slate-400 font-medium">Connected device trackers, visibility rules, and map badges</p>
             </div>
           </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.devices ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
+          <div className="p-1 text-slate-400 hover:text-slate-600 transition">
+            {openSections.devices ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
           </div>
         </button>
 
         {openSections.devices && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-6">
-            {/* Connected Telemetry Units List */}
-            <div className="space-y-3 pt-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold text-slate-800">
-                  Your Connected Devices ({devices.length})
-                </h3>
+          <div className="mt-6 pt-5 border-t border-slate-100/90 space-y-4">
+            {devicesLoading ? (
+              <div className="flex items-center justify-center py-8 text-slate-400 text-xs font-semibold">
+                <RefreshCw className="w-4 h-4 animate-spin mr-2" />
+                Loading connected devices...
+              </div>
+            ) : devicesList.length === 0 ? (
+              <div className="text-center py-6 text-slate-400 text-xs font-medium">
+                No companion device trackers detected. Install or pair the Home Assistant Companion app to track position.
+              </div>
+            ) : (
+              devicesList.map((device) => {
+                const isEditing = editingDeviceId === device.entity_id;
+                return (
+                  <div
+                    key={device.entity_id}
+                    className="p-5 rounded-2xl bg-slate-50/80 border border-slate-200/70 shadow-xs space-y-4"
+                  >
+                    {/* Device Header & Name */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-200/50">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-lg shadow-2xs">
+                          {device.map_icon ? device.map_icon.split(" ")[0] : "📱"}
+                        </div>
+                        <div>
+                          {isEditing ? (
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={editDeviceName}
+                                onChange={(e) => setEditDeviceName(e.target.value)}
+                                className="px-2.5 py-1 bg-white border border-indigo-400 rounded-lg text-sm font-bold text-slate-800 focus:outline-none"
+                                autoFocus
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUpdateDevice(device.entity_id, { name: editDeviceName.trim() })
+                                }
+                                className="p-1.5 bg-indigo-600 text-white rounded-lg text-xs font-bold hover:bg-indigo-700 cursor-pointer"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingDeviceId(null)}
+                                className="p-1.5 bg-slate-200 text-slate-700 rounded-lg text-xs font-bold hover:bg-slate-300 cursor-pointer"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <h3 className="text-sm font-bold text-slate-800">{device.name}</h3>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingDeviceId(device.entity_id);
+                                  setEditDeviceName(device.name);
+                                }}
+                                className="p-1 text-slate-400 hover:text-indigo-600 rounded-md transition cursor-pointer"
+                                title="Rename device"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                            <span>{device.platform}</span>
+                            <span>•</span>
+                            <span className="capitalize">{device.state}</span>
+                            <span>•</span>
+                            <span>Battery: {device.battery}%</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-[10px] text-slate-400 font-mono">
+                        ID: {device.entity_id}
+                      </div>
+                    </div>
+
+                    {/* Location Visibility Radio Group */}
+                    <div className="space-y-2">
+                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                        Location Visibility
+                      </label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <label
+                          className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${
+                            device.location_visibility !== "me_only"
+                              ? "bg-indigo-50/50 border-indigo-200 text-indigo-950 font-bold"
+                              : "bg-white border-slate-200/80 text-slate-600 hover:bg-slate-50"
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name={`visibility-${device.entity_id}`}
+                            value="family"
+                            checked={device.location_visibility !== "me_only"}
+                            onChange={() =>
+                              handleUpdateDevice(device.entity_id, { location_visibility: "family" })
+                            }
+                            className="sr-only"
+                          />
+                          <div
+                            className={`w-4 h-4 rounded-full border flex items-center justify-center ${
+                              device.location_visibility !== "me_only"
+                                ? "border-indigo-600 bg-indigo-600"
+                                : "border-slate-300 bg-white"
+                            }`}
+                          >
+                            {device.location_visibility !== "me_only" && (
+                              <div className="w-1.5 h-1.5 rounded-full bg-white" />
+                            )}
+                          </div>
+                          <div className="text-xs">
+                            <span className="block font-bold">Family Circle + Me</span>
+                            <span className="text-[10px] text-slate-400 font-normal">
+                              Visible to everyone in your circle
+                            </span>
+                          </div>
+                        </label>
+
+                        <label
+                          className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${
+                            device.location_visibility === "me_only"
+                              ? "bg-indigo-50/50 border-indigo-200 text-indigo-950 font-bold"
+                              : "bg-white border-slate-200/80 text-slate-600 hover:bg-slate-50"
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name={`visibility-${device.entity_id}`}
+                            value="me_only"
+                            checked={device.location_visibility === "me_only"}
+                            onChange={() =>
+                              handleUpdateDevice(device.entity_id, { location_visibility: "me_only" })
+                            }
+                            className="sr-only"
+                          />
+                          <div
+                            className={`w-4 h-4 rounded-full border flex items-center justify-center ${
+                              device.location_visibility === "me_only"
+                                ? "border-indigo-600 bg-indigo-600"
+                                : "border-slate-300 bg-white"
+                            }`}
+                          >
+                            {device.location_visibility === "me_only" && (
+                              <div className="w-1.5 h-1.5 rounded-full bg-white" />
+                            )}
+                          </div>
+                          <div className="text-xs">
+                            <span className="block font-bold">Me only</span>
+                            <span className="text-[10px] text-slate-400 font-normal">
+                              Hidden from all circle members
+                            </span>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+
+                    {/* Map Icon Dropdown */}
+                    <div className="space-y-1.5">
+                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                        Map Icon
+                      </label>
+                      <div className="relative">
+                        <select
+                          value={device.map_icon || "📱 Phone"}
+                          onChange={(e) =>
+                            handleUpdateDevice(device.entity_id, { map_icon: e.target.value })
+                          }
+                          className="w-full appearance-none px-3.5 py-2.5 bg-white border border-slate-200/80 rounded-xl text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 shadow-xs cursor-pointer pr-10"
+                        >
+                          {DEVICE_ICONS.map((icon) => (
+                            <option key={icon} value={icon}>
+                              {icon}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ======================================================== */}
+      {/* MODALS & OVERLAYS */}
+      {/* ======================================================== */}
+
+      {/* Change Password Modal */}
+      {showPasswordModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+            <button
+              onClick={() => {
+                setShowPasswordModal(false);
+                setPasswordError(null);
+                setPasswordSuccess(null);
+              }}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-3">
+              <KeyRound className="w-6 h-6" />
+            </div>
+
+            <h3 className="text-base font-bold text-slate-800">Change Password</h3>
+            <p className="text-xs text-slate-400 mt-1 mb-4">
+              Enter your current password and choose a new secure password
+            </p>
+
+            {passwordError && (
+              <div className="mb-3 p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{passwordError}</span>
+              </div>
+            )}
+            {passwordSuccess && (
+              <div className="mb-3 p-2.5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-semibold flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{passwordSuccess}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleChangePassword} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Current Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={showCurrentPass ? "text" : "password"}
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 pr-9"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentPass(!showCurrentPass)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    {showCurrentPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  New Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={showNewPass ? "text" : "password"}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 pr-9"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPass(!showNewPass)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    {showNewPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Confirm New Password
+                </label>
+                <input
+                  type={showNewPass ? "text" : "password"}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                  required
+                />
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2">
                 <button
                   type="button"
-                  onClick={fetchDevices}
-                  disabled={loading}
-                  className="text-[11px] font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  onClick={() => setShowPasswordModal(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition cursor-pointer"
                 >
-                  <RefreshCw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} />
-                  Refresh
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={passwordLoading}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {passwordLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Save Password</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Join Circle Modal */}
+      {showJoinModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+            <button
+              onClick={() => {
+                setShowJoinModal(false);
+                setCircleActionError(null);
+              }}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-3">
+              <LogIn className="w-6 h-6" />
+            </div>
+
+            <h3 className="text-base font-bold text-slate-800">Join a Family Circle</h3>
+            <p className="text-xs text-slate-400 mt-1 mb-4">
+              Enter an invite code or scan a QR code from another family member
+            </p>
+
+            {circleActionError && (
+              <div className="mb-3 p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{circleActionError}</span>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Circle Invite Code
+                </label>
+                <input
+                  type="text"
+                  value={inviteCodeInput}
+                  onChange={(e) => setInviteCodeInput(e.target.value.toUpperCase())}
+                  placeholder="e.g. ABC123"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono font-bold tracking-wider text-slate-800 uppercase placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowQRScanner(true)}
+                  className="w-full py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Camera className="w-4 h-4 text-indigo-600" />
+                  <span>Scan QR Code</span>
                 </button>
               </div>
 
-              {loading ? (
-                <p className="text-xs text-slate-400 font-semibold">Loading companion telemetry units...</p>
-              ) : devices.length === 0 ? (
-                <div className="p-5 rounded-2xl bg-slate-50/50 border border-slate-100/60 text-center">
-                  <p className="text-xs font-bold text-slate-600">No active tracking units paired yet</p>
-                  <p className="text-[10px] text-slate-400 font-semibold mt-1">
-                    Follow the companion guide below to sync device telemetry.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2.5">
-                  {devices.map((device) => (
-                    <div
-                      key={device.entityId}
-                      className="p-4 rounded-2xl bg-slate-50/50 border border-slate-100/60 flex items-center justify-between"
-                    >
-                      <div className="space-y-0.5">
-                        <p className="text-xs font-bold text-slate-800">{device.name}</p>
-                        <p className="text-[9px] text-slate-400 font-mono font-semibold">{device.entityId}</p>
-                      </div>
-                      <div className="text-right space-y-0.5">
-                        <span className="text-xs text-slate-700 font-bold flex items-center justify-end gap-1">
-                          <Battery className="w-3.5 h-3.5 text-emerald-600" />
-                          {device.battery}%
-                        </span>
-                        <p className="text-[9px] text-slate-400 font-semibold">Updated: {device.lastUpdated}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Companion App Registration Guide */}
-            <div className="border-t border-slate-100/80 pt-5 space-y-3">
-              <div className="flex items-center gap-2">
-                <HelpCircle className="w-4 h-4 text-indigo-600" />
-                <h3 className="text-xs font-bold text-slate-800">
-                  Home Assistant Companion App Setup
-                </h3>
-              </div>
-
-              <p className="text-xs text-slate-400 font-semibold leading-relaxed">
-                Yimly Home uses standard, production-hardened Home Assistant companion app protocols. You can connect the official Companion App directly to this bridge.
-              </p>
-
-              <div className="p-4 rounded-2xl bg-slate-50/60 border border-slate-100 space-y-3">
-                <div>
-                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block mb-1">
-                    1. Server Address
-                  </span>
-                  <input
-                    type="text"
-                    readOnly
-                    value={serverOrigin}
-                    className="w-full px-4 py-2 bg-white border border-slate-200/70 rounded-xl text-xs font-mono text-indigo-600 select-all shadow-xs focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block mb-1">
-                    2. Credentials
-                  </span>
-                  <p className="text-xs text-slate-500 font-semibold leading-relaxed">
-                    Use your Yimly account credentials (<strong className="text-slate-700 font-bold">{user?.username}</strong>) and password directly. No extra token setup required!
-                  </p>
-                </div>
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowJoinModal(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => executeJoinCircle(inviteCodeInput)}
+                  disabled={circleActionLoading || !inviteCodeInput.trim()}
+                  className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {circleActionLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Join</span>
+                </button>
               </div>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* ========================================================================= */}
-      {/* 10. ABOUT SECTION (VERSION, PWA INSTALL & SIGN OUT) */}
-      {/* ========================================================================= */}
-      <div className="bg-white/95 backdrop-blur-2xl rounded-3xl border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.015)] overflow-hidden transition-all duration-200">
-        <button
-          type="button"
-          onClick={() => toggleSection("about")}
-          className="w-full p-6 sm:p-7 flex items-center justify-between text-left hover:bg-slate-50/50 transition cursor-pointer select-none"
-        >
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100/50 flex items-center justify-center text-indigo-600 shrink-0 shadow-xs">
-              <Info className="w-5 h-5" />
+      {/* Create Circle Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+            <button
+              onClick={() => {
+                setShowCreateModal(false);
+                setCircleActionError(null);
+              }}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-3">
+              <PlusCircle className="w-6 h-6" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-800">About</h2>
-                <span className="text-[10px] font-extrabold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
-                  v1.4.0
-                </span>
+
+            <h3 className="text-base font-bold text-slate-800">Create a Family Circle</h3>
+            <p className="text-xs text-slate-400 mt-1 mb-4">
+              Choose a friendly name for your new family circle
+            </p>
+
+            {circleActionError && (
+              <div className="mb-3 p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{circleActionError}</span>
               </div>
-              <p className="text-xs text-slate-400 font-semibold mt-0.5">
-                Application version, PWA offline installation, and account session controls
-              </p>
+            )}
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Circle Name
+                </label>
+                <input
+                  type="text"
+                  value={newCircleNameInput}
+                  onChange={(e) => setNewCircleNameInput(e.target.value)}
+                  placeholder="e.g. The Yimly Family"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                />
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowCreateModal(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={executeCreateCircle}
+                  disabled={circleActionLoading || !newCircleNameInput.trim()}
+                  className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {circleActionLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Create</span>
+                </button>
+              </div>
             </div>
           </div>
-          <div
-            className={`w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 transition-transform duration-200 shrink-0 ${
-              openSections.about ? "rotate-180 bg-slate-200/80 text-slate-800" : ""
-            }`}
-          >
-            <ChevronDown className="w-4 h-4" />
-          </div>
-        </button>
+        </div>
+      )}
 
-        {openSections.about && (
-          <div className="px-6 pb-7 sm:px-8 sm:pb-8 pt-1 border-t border-slate-100/60 space-y-5">
-            <div className="p-4 rounded-2xl bg-slate-50/60 border border-slate-100 space-y-1.5 pt-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-800">Yimly Home Core</span>
-                <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-100">
-                  Direct Bridge Active
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 font-semibold">
-                High-performance private location sharing and family safety telemetry platform.
-              </p>
+      {/* Switch Circle Warning Modal */}
+      {showSwitchWarning && selectedCircle && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+            <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mb-3">
+              <AlertCircle className="w-6 h-6" />
             </div>
 
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pt-1">
-              <PWAInstallButton />
+            <h3 className="text-base font-bold text-slate-800">Switch Family Circle</h3>
+            <p className="text-xs text-slate-600 mt-2 mb-4 leading-relaxed">
+              You're currently in: <span className="font-bold text-slate-800">{selectedCircle.name}</span>.
+              <br />
+              {showSwitchWarning === "join"
+                ? "Joining another circle will automatically remove you from your current circle."
+                : "Creating another circle will automatically remove you from your current circle."}
+            </p>
 
+            <div className="pt-2 flex items-center justify-end gap-2">
               <button
                 type="button"
-                onClick={onLogout}
-                className="flex items-center justify-center gap-2 rounded-2xl bg-rose-50 hover:bg-rose-100/80 active:bg-rose-200 text-rose-700 font-bold px-4 py-2.5 text-xs transition border border-rose-100/40 shadow-xs cursor-pointer"
+                onClick={() => setShowSwitchWarning(null)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition cursor-pointer"
               >
-                <LogOut className="w-4 h-4 text-rose-500" />
-                Sign Out of Account
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = showSwitchWarning;
+                  setShowSwitchWarning(null);
+                  if (target === "join") {
+                    setShowJoinModal(true);
+                  } else {
+                    setShowCreateModal(true);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-xs transition cursor-pointer"
+              >
+                Proceed
               </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Leave Circle Confirmation Modal */}
+      {showLeaveConfirm && selectedCircle && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+            <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mb-3">
+              <LogOut className="w-6 h-6" />
+            </div>
+
+            <h3 className="text-base font-bold text-slate-800">Leave Family Circle</h3>
+            <p className="text-xs text-slate-600 mt-2 mb-4 leading-relaxed">
+              Are you sure you want to leave{" "}
+              <span className="font-bold text-slate-800">{selectedCircle.name}</span>? You will stop sharing location with this circle.
+            </p>
+
+            <div className="pt-2 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowLeaveConfirm(false)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmLeave}
+                disabled={circleActionLoading}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {circleActionLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>Leave Circle</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QR Scanner Modal */}
+      <QRScannerModal
+        isOpen={showQRScanner}
+        onClose={() => setShowQRScanner(false)}
+        onScan={(code) => {
+          setInviteCodeInput(code.toUpperCase());
+          setShowQRScanner(false);
+          setShowJoinModal(true);
+        }}
+      />
     </div>
   );
 };

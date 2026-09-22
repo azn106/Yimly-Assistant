@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import { motion } from "motion/react";
+import React, { useEffect, useRef, useState, useCallback, useMemo, useImperativeHandle } from "react";
+import { motion, useMotionValue, animate } from "motion/react";
 import * as maplibregl from "maplibre-gl";
 import { CircleMember, LocationHistoryItem } from "../types";
 import { getMapStyle } from "../lib/mapStyles";
@@ -23,7 +23,11 @@ import {
   EyeOff
 } from "lucide-react";
 
-interface MapComponentProps {
+export interface MapComponentHandle {
+  focusMember: (memberOrId: CircleMember | number) => void;
+}
+
+export interface MapComponentProps {
   members: CircleMember[];
   onRefresh: () => void;
   loading: boolean;
@@ -168,7 +172,7 @@ function getDarkerRouteColor(hexColor?: string | null): string {
 }
 
 function getSubtleTintStyle(hexColor?: string | null): string {
-  if (!hexColor) return "rgba(255, 255, 255, 0.9)";
+  if (!hexColor) return "rgba(255, 255, 255, 0.60)";
   let hex = hexColor.replace("#", "");
   if (hex.length === 3) {
     hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
@@ -177,12 +181,12 @@ function getSubtleTintStyle(hexColor?: string | null): string {
   const g = parseInt(hex.substring(2, 4), 16) || 70;
   const b = parseInt(hex.substring(4, 6), 16) || 229;
   
-  // Mix 95% white and 5% member color for an extremely soft pastel tint
-  const mixedR = Math.round(255 * 0.95 + r * 0.05);
-  const mixedG = Math.round(255 * 0.95 + g * 0.05);
-  const mixedB = Math.round(255 * 0.95 + b * 0.05);
+  // Mix 20% white and 80% member color for a distinct translucent wash
+  const mixedR = Math.round(255 * 0.20 + r * 0.80);
+  const mixedG = Math.round(255 * 0.20 + g * 0.80);
+  const mixedB = Math.round(255 * 0.20 + b * 0.80);
   
-  return `rgba(${mixedR}, ${mixedG}, ${mixedB}, 0.92)`;
+  return `rgba(${mixedR}, ${mixedG}, ${mixedB}, 0.38)`;
 }
 
 // Calculate distance in km between two coordinates using Haversine formula
@@ -197,7 +201,7 @@ function calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: num
   return R * c;
 }
 
-export const MapComponent: React.FC<MapComponentProps> = ({ 
+export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentProps>(function MapComponent({ 
   members, 
   onRefresh, 
   loading, 
@@ -206,7 +210,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
   unselectedIconSize,
   selectedMemberId: propSelectedMemberId,
   onSelectMemberId
-}) => {
+}, ref) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<{ [key: string]: maplibregl.Marker }>({});
@@ -218,13 +222,11 @@ export const MapComponent: React.FC<MapComponentProps> = ({
   const selectedMemberId = isControlled ? propSelectedMemberId : internalSelectedMemberId;
 
   const setSelectedMemberId = useCallback((id: number | null) => {
-    if (!isControlled) {
-      setInternalSelectedMemberId(id);
-    }
+    setInternalSelectedMemberId(id);
     if (onSelectMemberId) {
       onSelectMemberId(id);
     }
-  }, [isControlled, onSelectMemberId]);
+  }, [onSelectMemberId]);
 
   // Card View and History Navigation States
   const [isCardHidden, setIsCardHidden] = useState<boolean>(false);
@@ -261,11 +263,31 @@ export const MapComponent: React.FC<MapComponentProps> = ({
   // Mobile touch gesture states and refs
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const touchCurrentRef = useRef<{ x: number; y: number } | null>(null);
+  const lastTouchRef = useRef<{ y: number; time: number } | null>(null);
   const axisLockRef = useRef<"x" | "y" | null>(null);
   const startTimeRef = useRef<number>(0);
 
-  const [dragOffsetY, setDragOffsetY] = useState<number>(0);
+  const sheetY = useMotionValue(sheetState === "expanded" ? 0 : 404);
+  const isDraggingYRef = useRef<boolean>(false);
+  const isGestureReleaseRef = useRef<boolean>(false);
+  const sheetStartPosRef = useRef<number>(sheetState === "expanded" ? 0 : 404);
+
   const [dragOffsetX, setDragOffsetX] = useState<number>(0);
+
+  // Sync sheetY when sheetState changes programmatically (e.g. tap on handle or collapse button)
+  useEffect(() => {
+    if (isGestureReleaseRef.current) {
+      isGestureReleaseRef.current = false;
+      return;
+    }
+    if (!isDraggingYRef.current) {
+      animate(sheetY, sheetState === "expanded" ? 0 : 404, {
+        type: "spring",
+        stiffness: 300,
+        damping: 30
+      });
+    }
+  }, [sheetState, sheetY]);
 
   // Native TouchEvent handlers to completely own mobile gestures
   const handleTouchStart = useCallback((e: TouchEvent) => {
@@ -274,12 +296,16 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     const touch = e.touches[0];
     touchStartRef.current = { x: touch.clientX, y: touch.clientY };
     touchCurrentRef.current = { x: touch.clientX, y: touch.clientY };
+    lastTouchRef.current = { y: touch.clientY, time: Date.now() };
     axisLockRef.current = null;
     startTimeRef.current = Date.now();
+    sheetStartPosRef.current = sheetY.get();
+    isDraggingYRef.current = false;
+    isGestureReleaseRef.current = false;
+    sheetY.stop();
     
-    setDragOffsetY(0);
     setDragOffsetX(0);
-  }, []);
+  }, [sheetY]);
 
   const handleTouchMove = useCallback((e: TouchEvent) => {
     if (!touchStartRef.current || e.touches.length !== 1) return;
@@ -291,6 +317,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     const deltaY = touch.clientY - start.y;
     
     touchCurrentRef.current = { x: touch.clientX, y: touch.clientY };
+    lastTouchRef.current = { y: touch.clientY, time: Date.now() };
     
     const distanceX = Math.abs(deltaX);
     const distanceY = Math.abs(deltaY);
@@ -314,12 +341,20 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     e.stopPropagation();
     
     if (axisLockRef.current === "y") {
-      // Dragging vertical bottom-sheet
-      if (sheetState === "expanded") {
-        setDragOffsetY(Math.max(-20, deltaY)); // subtle resist when pulling past expanded
-      } else {
-        setDragOffsetY(Math.min(20, deltaY)); // subtle resist when pulling past compact
+      isDraggingYRef.current = true;
+      // Dragging vertical bottom-sheet directly from starting point
+      const startPos = sheetStartPosRef.current;
+      let newY = startPos + deltaY;
+      
+      // Elastic resistance when dragging past boundaries
+      if (newY < 0) {
+        newY = newY * 0.2;
+      } else if (newY > 404) {
+        const overshoot = newY - 404;
+        newY = 404 + overshoot * 0.2;
       }
+      
+      sheetY.set(newY);
     } else if (axisLockRef.current === "x") {
       // Dragging horizontal pages container
       if (mobilePage === 0) {
@@ -328,7 +363,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
         setDragOffsetX(Math.max(-20, deltaX));
       }
     }
-  }, [sheetState, mobilePage]);
+  }, [mobilePage, sheetY]);
 
   const handleTouchEnd = useCallback((e: TouchEvent) => {
     if (!touchStartRef.current) return;
@@ -340,11 +375,12 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     }
     
     if (!current) {
-      setDragOffsetY(0);
       setDragOffsetX(0);
       touchStartRef.current = null;
       touchCurrentRef.current = null;
+      lastTouchRef.current = null;
       axisLockRef.current = null;
+      isDraggingYRef.current = false;
       return;
     }
     
@@ -364,14 +400,42 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       const thresholdY = 60; // snap threshold
       const isFastY = velocityY > 0.3;
       
+      let targetState: "expanded" | "compact" = sheetState;
       if (sheetState === "expanded") {
         if (deltaY > thresholdY || (isFastY && deltaY > 0)) {
-          setSheetState("compact");
+          targetState = "compact";
+        } else {
+          targetState = "expanded";
         }
       } else {
         if (deltaY < -thresholdY || (isFastY && deltaY < 0)) {
-          setSheetState("expanded");
+          targetState = "expanded";
+        } else {
+          targetState = "compact";
         }
+      }
+      
+      const targetY = targetState === "expanded" ? 0 : 404;
+      
+      // Calculate release velocity in px/s, preserving natural gesture momentum
+      const now = Date.now();
+      const last = lastTouchRef.current || { y: current.y, time: now };
+      const timeDiff = Math.max(1, now - last.time);
+      const vy = timeDiff > 120 ? 0 : ((current.y - last.y) / timeDiff) * 1000;
+      
+      isDraggingYRef.current = false;
+      isGestureReleaseRef.current = true;
+      
+      // Animate smoothly from the EXACT current drag position directly to target snap point
+      animate(sheetY, targetY, {
+        type: "spring",
+        stiffness: 300,
+        damping: 30,
+        velocity: vy
+      });
+      
+      if (targetState !== sheetState) {
+        setSheetState(targetState);
       }
     } else if (currentAxis === "x") {
       const thresholdX = 60; // snap threshold
@@ -388,13 +452,12 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       }
     }
     
-    // Reset drag offsets
-    setDragOffsetY(0);
     setDragOffsetX(0);
     touchStartRef.current = null;
     touchCurrentRef.current = null;
+    lastTouchRef.current = null;
     axisLockRef.current = null;
-  }, [sheetState, mobilePage]);
+  }, [sheetState, mobilePage, sheetY]);
 
   // Bind non-passive Touch listeners directly to own gestures, ignoring child interference
   useEffect(() => {
@@ -759,20 +822,34 @@ export const MapComponent: React.FC<MapComponentProps> = ({
   }, [getBottomPadding]);
 
   // Focus member, center map in usable area above card, and show member information card
-  const handleFocusMember = useCallback((member: CircleMember) => {
-    if (selectedMemberId && selectedMemberId !== member.id) {
+  const handleFocusMember = useCallback((memberOrId: CircleMember | number) => {
+    const memberId = typeof memberOrId === "number" ? memberOrId : memberOrId.id;
+    const targetMember = 
+      membersWithLocRef.current.find(m => m.id === memberId) || 
+      members.find(m => m.id === memberId) || 
+      (typeof memberOrId !== "number" ? memberOrId : null);
+
+    if (!targetMember) return;
+
+    if (selectedMemberId && selectedMemberId !== targetMember.id) {
       navMemberHistoryRef.current.push(selectedMemberId);
     }
-    setSelectedMemberId(member.id);
+    setSelectedMemberId(targetMember.id);
     setCustomDateError(null);
     setIsCardHidden(false);
+    setSheetState("expanded");
+    setMobilePage(0);
 
     // Direct flyTo using clicked member's current coordinates
-    flyToMemberLocation(member, false, 800);
+    flyToMemberLocation(targetMember, false, 800);
     if (isHistoryOpen) {
-      fetchMemberHistory(member.id, activeRange);
+      fetchMemberHistory(targetMember.id, activeRange);
     }
-  }, [selectedMemberId, isHistoryOpen, activeRange, fetchMemberHistory, flyToMemberLocation]);
+  }, [selectedMemberId, members, isHistoryOpen, activeRange, fetchMemberHistory, flyToMemberLocation, setSelectedMemberId]);
+
+  useImperativeHandle(ref, () => ({
+    focusMember: handleFocusMember
+  }), [handleFocusMember]);
 
   // Synchronise external propSelectedMemberId with internal selection state
   useEffect(() => {
@@ -1002,6 +1079,8 @@ export const MapComponent: React.FC<MapComponentProps> = ({
         handleFocusMember(freshMember);
       };
 
+      const deviceIcon = primaryDevice.map_icon ? primaryDevice.map_icon.split(" ")[0] : "📱";
+
       el.innerHTML = `
         <div class="relative w-full h-full rounded-full flex items-center justify-center transition-all duration-300"
              style="
@@ -1024,6 +1103,9 @@ export const MapComponent: React.FC<MapComponentProps> = ({
                 ? `<img src="${member.profile_picture_url}" alt="${member.display_name}" class="w-full h-full object-cover rounded-full pointer-events-none" />`
                 : member.display_name.charAt(0).toUpperCase()
             }
+          </div>
+          <div class="absolute -top-1 -left-1 bg-white text-slate-800 text-[10px] w-4.5 h-4.5 rounded-full shadow-xs border border-slate-200/80 flex items-center justify-center pointer-events-none">
+            ${deviceIcon}
           </div>
           ${
             primaryDevice.battery !== undefined && primaryDevice.battery !== null
@@ -1173,7 +1255,13 @@ export const MapComponent: React.FC<MapComponentProps> = ({
           }}
           className="absolute bottom-[88px] sm:bottom-22 left-3 right-3 sm:left-1/2 sm:-translate-x-1/2 sm:w-[520px] sm:max-w-[calc(100vw-2rem)] z-30 pointer-events-auto"
         >
-          <div className="bg-white/95 backdrop-blur-2xl p-4 sm:p-5 rounded-3xl shadow-[0_12px_40px_rgba(0,0,0,0.16)] border border-white/80 transition-all duration-300 space-y-3">
+          <div 
+            className="backdrop-blur-2xl p-4 sm:p-5 rounded-3xl shadow-[0_12px_40px_rgba(0,0,0,0.08)] border border-white/50 transition-all duration-300 space-y-3"
+            style={{
+              backgroundColor: getSubtleTintStyle(selectedMember.avatar_color),
+              transition: "background-color 350ms cubic-bezier(0.4, 0, 0.2, 1)"
+            }}
+          >
             {/* Small Drag Handle at the top of the sheet (Mobile Only) */}
             {isMobile && !isHistoryOpen && (
               <div 
@@ -1542,16 +1630,11 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       {selectedMember && !isCardHidden && isMobile && (
         <motion.div
           ref={cardContainerRef}
-          layout
-          animate={{
-            y: sheetState === "expanded" ? 0 : 404
-          }}
-          transition={{ type: "spring", stiffness: 300, damping: 30 }}
-          className="fixed bottom-[calc(88px+env(safe-area-inset-bottom,16px))] left-3 right-3 h-[440px] z-30 pointer-events-auto backdrop-blur-2xl border border-white/85 shadow-[0_-12px_40px_rgba(0,0,0,0.12)] rounded-t-[32px] rounded-b-2xl overflow-hidden select-none touch-none"
+          className="fixed bottom-[calc(88px+env(safe-area-inset-bottom,16px))] left-3 right-3 h-[440px] z-30 pointer-events-auto backdrop-blur-2xl border border-white/50 shadow-[0_-12px_40px_rgba(0,0,0,0.08)] rounded-t-[32px] rounded-b-2xl overflow-hidden select-none touch-none"
           style={{
             backgroundColor: getSubtleTintStyle(selectedMember.avatar_color),
             transition: "background-color 350ms cubic-bezier(0.4, 0, 0.2, 1)",
-            y: (sheetState === "expanded" ? 0 : 404) + dragOffsetY
+            y: sheetY
           }}
         >
           {/* Centered Drag Handle / Tap to expand-collapse */}
@@ -1784,4 +1867,4 @@ export const MapComponent: React.FC<MapComponentProps> = ({
 
     </div>
   );
-};
+});

@@ -7,6 +7,15 @@ export interface UserInfo {
   map_style?: string | null;
   map_selected_icon_size?: number | null;
   map_unselected_icon_size?: number | null;
+  share_location?: boolean;
+  save_location_history?: boolean;
+  history_retention?: string;
+  location_update_frequency?: string;
+  notify_push?: boolean;
+  notify_arrival_departure?: boolean;
+  notify_stop_sharing?: boolean;
+  notify_low_battery?: boolean;
+  notify_device_offline?: boolean;
 }
 
 export interface MemberDeviceLocation {
@@ -17,6 +26,20 @@ export interface MemberDeviceLocation {
   battery?: number | string | null;
   accuracy?: number | null;
   last_updated: string;
+  platform?: string;
+  location_visibility?: "family" | "me_only";
+  map_icon?: string;
+}
+
+export interface UserDevice {
+  entity_id: string;
+  name: string;
+  platform: string;
+  battery: number | string;
+  state: string;
+  last_updated: string;
+  location_visibility: "family" | "me_only";
+  map_icon: string;
 }
 
 export interface CircleMember {

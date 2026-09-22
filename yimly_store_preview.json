@@ -4,10 +4,19 @@
       "id": 1,
       "username": "admin@yimly.home",
       "password_hash": "$2b$10$m4WjH4UYq98/cYTz.wcVWud5YF6lGKYSoC41ef7M.AQgVkirA3aRG",
-      "display_name": "Yimly Admin (Preview)",
+      "display_name": "Administrator",
       "avatar_color": "#bbf7d0",
       "created_at": "2026-09-21T06:41:22.503Z",
-      "map_style": "osm"
+      "map_style": "openfree_positron",
+      "map_selected_icon_size": 50,
+      "map_unselected_icon_size": 36,
+      "share_location": true,
+      "save_location_history": true,
+      "history_retention": "30d",
+      "location_update_frequency": "1m",
+      "notify_push": true,
+      "notify_arrival_departure": true,
+      "notify_low_battery": true
     },
     {
       "id": 2,
@@ -25,7 +34,7 @@
       "avatar_color": "#E2D9F3",
       "created_at": "2026-09-21T07:39:57.470Z",
       "map_style": "openfree_positron",
-      "profile_picture_url": "/uploads/profile_pictures/user_3_1789999646664_f1d41f06.jpg",
+      "profile_picture_url": "/uploads/profile_pictures/user_3_1790066158844_c1183aa3.jpg",
       "map_selected_icon_size": 72,
       "map_unselected_icon_size": 42
     },
@@ -72,6 +81,17 @@
       "map_selected_icon_size": 48,
       "map_unselected_icon_size": 36,
       "created_at": "2026-09-21T15:22:51.035Z"
+    },
+    {
+      "id": 8,
+      "username": "azn106",
+      "password_hash": "$2b$10$GhQrKXrJ3LGLFln.ql3mjeXGdEjunG/0zvQwYBDYX8ev52p9WCUjG",
+      "display_name": "Hort",
+      "avatar_color": "#E2D9F3",
+      "map_style": "openfree_positron",
+      "map_selected_icon_size": 58,
+      "map_unselected_icon_size": 42,
+      "created_at": "2026-09-22T08:33:50.411Z"
     }
   ],
   "circles": [
@@ -81,13 +101,6 @@
       "owner_id": 1,
       "invite_code": "YIMLY-PREVIEW-HQ",
       "created_at": "2026-09-21T06:41:22.503Z"
-    },
-    {
-      "id": 2,
-      "name": "Test",
-      "owner_id": 3,
-      "invite_code": "YIMLY-25A297",
-      "created_at": "2026-09-21T14:49:36.287Z"
     },
     {
       "id": 3,
@@ -102,6 +115,13 @@
       "owner_id": 1,
       "invite_code": "YIMLY-3A2817",
       "created_at": "2026-09-21T15:22:43.340Z"
+    },
+    {
+      "id": 5,
+      "name": "Yimly",
+      "owner_id": 8,
+      "invite_code": "YIMLY-B956A7",
+      "created_at": "2026-09-22T08:34:20.115Z"
     }
   ],
   "circle_members": [
@@ -120,10 +140,6 @@
     {
       "circle_id": 1,
       "user_id": 4
-    },
-    {
-      "circle_id": 2,
-      "user_id": 3
     },
     {
       "circle_id": 3,
@@ -148,6 +164,18 @@
     {
       "circle_id": 1,
       "user_id": 7
+    },
+    {
+      "circle_id": 1,
+      "user_id": 8
+    },
+    {
+      "circle_id": 5,
+      "user_id": 8
+    },
+    {
+      "circle_id": 5,
+      "user_id": 3
     }
   ],
   "entity_states": [
@@ -157,13 +185,15 @@
       "domain": "device_tracker",
       "state": "home",
       "attributes": {
-        "friendly_name": "Admin's Preview Phone",
+        "friendly_name": "Admin Phone Tracker",
         "battery_level": 95,
-        "gps_accuracy": 5
+        "gps_accuracy": 5,
+        "location_visibility": "family",
+        "map_icon": "📱 Phone"
       },
       "latitude": 37.7749,
       "longitude": -122.4194,
-      "last_updated": "2026-09-21T06:41:22.503Z"
+      "last_updated": "2026-09-22T10:24:29.898Z"
     },
     {
       "entity_id": "device_tracker.member_preview_phone",

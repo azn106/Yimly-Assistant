@@ -1,23 +1,19 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Lock,
   User,
-  LogOut,
   RefreshCw,
   AlertCircle,
   Home,
   UserCheck,
-  Compass,
-  Bell,
   Settings as SettingsIcon,
-  Users,
   X
 } from "lucide-react";
 
 import { Circle, CircleMember, UserInfo } from "./types";
 import { NavIcon, NavIconPackId } from "./lib/navIcons";
-import { MapComponent } from "./components/MapComponent";
+import { MapComponent, MapComponentHandle } from "./components/MapComponent";
 import { PeopleTab } from "./components/PeopleTab";
 import { PlacesTab } from "./components/PlacesTab";
 import { AlertsTab } from "./components/AlertsTab";
@@ -45,6 +41,7 @@ export default function App() {
 
   // Selected Member State (Synced with MapComponent selection)
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null);
+  const mapComponentRef = useRef<MapComponentHandle | null>(null);
 
   // Navigation Icon Pack State: "classic" | "minimal" | "rounded" | "bold" | "modern"
   const [navIconPack, setNavIconPack] = useState<NavIconPackId>(() => {
@@ -54,11 +51,6 @@ export default function App() {
     }
     return "classic";
   });
-
-  const handleSelectNavIconPack = (pack: NavIconPackId) => {
-    setNavIconPack(pack);
-    localStorage.setItem("nav_icon_pack", pack);
-  };
 
   // Run on mount to check existing session, setup status, and register SW
   useEffect(() => {
@@ -436,6 +428,7 @@ export default function App() {
           {/* 1. FULL-SCREEN DOMINANT MAP BACKGROUND */}
           <div className="absolute inset-0 z-0 w-full h-full">
             <MapComponent
+              ref={mapComponentRef}
               members={circleMembers}
               onRefresh={() => selectedCircle && fetchCircleMembers(selectedCircle.id)}
               loading={circlesLoading}
@@ -497,24 +490,16 @@ export default function App() {
               <span>Alerts</span>
             </button>
 
-            <button
-              onClick={() => setActiveTab("settings")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition cursor-pointer ${
-                activeTab === "settings"
-                  ? "bg-slate-900 text-white shadow-md"
-                  : "text-slate-600 hover:bg-slate-100/70"
-              }`}
-            >
-              <NavIcon tab="settings" pack={navIconPack} isSelected={activeTab === "settings"} className="w-4 h-4" />
-              <span>Settings</span>
-            </button>
-
             <div className="w-px h-6 bg-slate-200/80 my-auto mx-1" />
 
-            {/* Profile Avatar Pill */}
+            {/* Profile Avatar Pill (Settings & Account) */}
             <div 
               onClick={() => setActiveTab("settings")}
-              className="w-8 h-8 rounded-full text-white font-extrabold text-xs flex items-center justify-center cursor-pointer shadow-sm transition hover:scale-105 overflow-hidden shrink-0"
+              className={`w-8 h-8 rounded-full text-white font-extrabold text-xs flex items-center justify-center cursor-pointer shadow-sm transition hover:scale-105 overflow-hidden shrink-0 ${
+                activeTab === "settings"
+                  ? "ring-2 ring-slate-900 ring-offset-2 scale-105"
+                  : ""
+              }`}
               style={{
                 backgroundColor: user?.avatar_color || "#4f46e5",
                 boxShadow: `0 0 0 2px white, 0 2px 8px ${user?.avatar_color || '#4f46e5'}60`
@@ -581,7 +566,11 @@ export default function App() {
                     key={member.id}
                     onClick={() => {
                       setActiveTab("map");
-                      setSelectedMemberId(member.id);
+                      if (mapComponentRef.current) {
+                        mapComponentRef.current.focusMember(member);
+                      } else {
+                        setSelectedMemberId(member.id);
+                      }
                     }}
                     className="flex flex-col items-center gap-1 shrink-0 cursor-pointer min-w-[56px] focus:outline-none"
                   >
@@ -637,20 +626,22 @@ export default function App() {
                 transition={{ duration: 0.2 }}
                 className="fixed inset-4 md:inset-12 bottom-20 md:bottom-20 z-30 bg-white/95 backdrop-blur-3xl rounded-3xl p-6 md:p-8 shadow-2xl border border-white/80 overflow-y-auto max-w-4xl mx-auto pointer-events-auto"
               >
-                {/* Modal Header Bar */}
-                <div className="flex items-center justify-between pb-4 mb-6 border-b border-slate-100">
-                  <span className="text-xs font-black uppercase tracking-widest text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full">
-                    {activeTab} view
-                  </span>
+                {/* Modal Header Bar (Only for secondary tabs that don't render their own custom header) */}
+                {activeTab !== "settings" && (
+                  <div className="flex items-center justify-between pb-4 mb-6 border-b border-slate-100">
+                    <span className="text-xs font-black uppercase tracking-widest text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full">
+                      {activeTab} view
+                    </span>
 
-                  <button
-                    onClick={() => setActiveTab("map")}
-                    className="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1 text-xs font-bold"
-                  >
-                    <span>Back to Map</span>
-                    <X className="w-4.5 h-4.5" />
-                  </button>
-                </div>
+                    <button
+                      onClick={() => setActiveTab("map")}
+                      className="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1 text-xs font-bold"
+                    >
+                      <span>Back to Map</span>
+                      <X className="w-4.5 h-4.5" />
+                    </button>
+                  </div>
+                )}
 
                 {/* Secondary Tab Content */}
                 {activeTab === "people" && (
@@ -669,6 +660,7 @@ export default function App() {
                   <SettingsTab
                     user={user}
                     onLogout={handleLogout}
+                    onClose={() => setActiveTab("map")}
                     onUserUpdate={(updated) => {
                       setUser(updated);
                       localStorage.setItem("user_info", JSON.stringify(updated));
@@ -684,8 +676,6 @@ export default function App() {
                     onLeaveCircle={handleLeaveCircle}
                     onDeleteCircle={handleDeleteCircle}
                     circlesLoading={circlesLoading}
-                    navIconPack={navIconPack}
-                    onSelectNavIconPack={handleSelectNavIconPack}
                   />
                 )}
               </motion.div>

@@ -42,7 +42,53 @@ export interface UserData {
   map_style?: string | null;
   map_selected_icon_size?: number | null;
   map_unselected_icon_size?: number | null;
+  share_location?: boolean;
+  save_location_history?: boolean;
+  history_retention?: string;
+  location_update_frequency?: string;
+  notify_push?: boolean;
+  notify_arrival_departure?: boolean;
+  notify_stop_sharing?: boolean;
+  notify_low_battery?: boolean;
+  notify_device_offline?: boolean;
   created_at: string;
+}
+
+export function formatUserResponse(u: UserData) {
+  return {
+    id: u.id,
+    username: u.username,
+    display_name: u.display_name,
+    avatar_color: u.avatar_color || "#E2D9F3",
+    profile_picture_url: u.profile_picture_url || null,
+    map_style: u.map_style || "osm",
+    map_selected_icon_size: u.map_selected_icon_size || 48,
+    map_unselected_icon_size: u.map_unselected_icon_size || 36,
+    share_location: u.share_location !== false,
+    save_location_history: u.save_location_history !== false,
+    history_retention: u.history_retention || "30d",
+    location_update_frequency: u.location_update_frequency || "realtime",
+    notify_push: u.notify_push !== false,
+    notify_arrival_departure: u.notify_arrival_departure !== false,
+    notify_stop_sharing: u.notify_stop_sharing !== false,
+    notify_low_battery: u.notify_low_battery !== false,
+    notify_device_offline: u.notify_device_offline !== false,
+    is_active: true
+  };
+}
+
+export function cleanupHistoryForUser(db: YimlyPreviewDatabase, userId: number, retention?: string) {
+  if (!retention || retention === "forever") return;
+  let cutoffMs = 30 * 86400000;
+  if (retention === "7d") cutoffMs = 7 * 86400000;
+  else if (retention === "30d") cutoffMs = 30 * 86400000;
+  else if (retention === "90d") cutoffMs = 90 * 86400000;
+  else if (retention === "1y") cutoffMs = 365 * 86400000;
+
+  const cutoffDate = new Date(Date.now() - cutoffMs).toISOString();
+  db.location_history = db.location_history.filter(
+    (h) => h.user_id !== userId || h.timestamp >= cutoffDate
+  );
 }
 
 export interface CircleData {
@@ -646,16 +692,7 @@ app.post("/api/auth/register", (req, res) => {
   res.json({
     access_token: token,
     token_type: "Bearer",
-    user: {
-      id: newUser.id,
-      username: newUser.username,
-      display_name: newUser.display_name,
-      avatar_color: newUser.avatar_color,
-      profile_picture_url: newUser.profile_picture_url || null,
-      map_style: newUser.map_style || "osm",
-      map_selected_icon_size: newUser.map_selected_icon_size || 48,
-      map_unselected_icon_size: newUser.map_unselected_icon_size || 36
-    }
+    user: formatUserResponse(newUser)
   });
 });
 
@@ -676,73 +713,131 @@ app.post("/api/auth/login", (req, res) => {
   res.json({
     access_token: token,
     token_type: "Bearer",
-    user: {
-      id: found.id,
-      username: found.username,
-      display_name: found.display_name,
-      avatar_color: found.avatar_color,
-      profile_picture_url: found.profile_picture_url || null,
-      map_style: found.map_style || "osm",
-      map_selected_icon_size: found.map_selected_icon_size || 48,
-      map_unselected_icon_size: found.map_unselected_icon_size || 36
-    }
+    user: formatUserResponse(found)
   });
 });
 
 app.get("/api/auth/me", authenticateToken, (req: AuthRequest, res) => {
-  const u = req.user!;
-  res.json({
-    id: u.id,
-    username: u.username,
-    display_name: u.display_name,
-    avatar_color: u.avatar_color || "#E2D9F3",
-    profile_picture_url: u.profile_picture_url || null,
-    map_style: u.map_style || "osm",
-    map_selected_icon_size: u.map_selected_icon_size || 48,
-    map_unselected_icon_size: u.map_unselected_icon_size || 36,
-    is_active: true
-  });
+  res.json(formatUserResponse(req.user!));
+});
+
+app.post("/api/auth/password", authenticateToken, (req: AuthRequest, res) => {
+  const { current_password, new_password } = req.body;
+  if (!current_password || !new_password) {
+    return res.status(400).json({ detail: "Current password and new password are required" });
+  }
+
+  db = loadDB();
+  const userIdx = db.users.findIndex((u) => u.id === req.user!.id);
+  if (userIdx === -1) {
+    return res.status(404).json({ detail: "User not found" });
+  }
+
+  if (!bcrypt.compareSync(current_password, db.users[userIdx].password_hash)) {
+    return res.status(400).json({ detail: "Current password is incorrect" });
+  }
+
+  if (new_password.length < 6) {
+    return res.status(400).json({ detail: "New password must be at least 6 characters" });
+  }
+
+  db.users[userIdx].password_hash = bcrypt.hashSync(new_password, 10);
+  saveDB(db);
+
+  res.json({ success: true, message: "Password updated successfully" });
 });
 
 app.put("/api/auth/profile", authenticateToken, (req: AuthRequest, res) => {
-  const { avatar_color, display_name, map_style, map_selected_icon_size, map_unselected_icon_size } = req.body;
+  const {
+    username,
+    display_name,
+    avatar_color,
+    map_style,
+    map_selected_icon_size,
+    map_unselected_icon_size,
+    share_location,
+    save_location_history,
+    history_retention,
+    location_update_frequency,
+    notify_push,
+    notify_arrival_departure,
+    notify_stop_sharing,
+    notify_low_battery,
+    notify_device_offline
+  } = req.body;
+
   db = loadDB();
   const userIdx = db.users.findIndex((u) => u.id === req.user!.id);
-  if (userIdx !== -1) {
-    if (avatar_color !== undefined) db.users[userIdx].avatar_color = avatar_color;
-    if (display_name !== undefined) db.users[userIdx].display_name = display_name;
-    if (map_style !== undefined) {
-      const allowed = ["osm", "openfree_positron", "openfree_bright", "openfree_liberty", "openfree_dark", "openfree_fiord", "carto_voyager", "carto_positron", "carto_dark"];
-      if (allowed.includes(map_style)) {
-        db.users[userIdx].map_style = map_style;
-      } else {
-        return res.status(400).json({ detail: "Invalid map_style value" });
-      }
-    }
-    if (map_selected_icon_size !== undefined && typeof map_selected_icon_size === "number") {
-      const s = Math.max(24, Math.min(72, map_selected_icon_size));
-      db.users[userIdx].map_selected_icon_size = s;
-    }
-    if (map_unselected_icon_size !== undefined && typeof map_unselected_icon_size === "number") {
-      const u = Math.max(24, Math.min(72, map_unselected_icon_size));
-      db.users[userIdx].map_unselected_icon_size = u;
-    }
-    saveDB(db);
-    const updated = db.users[userIdx];
-    res.json({
-      id: updated.id,
-      username: updated.username,
-      display_name: updated.display_name,
-      avatar_color: updated.avatar_color,
-      profile_picture_url: updated.profile_picture_url || null,
-      map_style: updated.map_style || "osm",
-      map_selected_icon_size: updated.map_selected_icon_size || 48,
-      map_unselected_icon_size: updated.map_unselected_icon_size || 36,
-      is_active: true
-    });
-  } else {
-    res.status(404).json({ detail: "User not found" });
+  if (userIdx === -1) {
+    return res.status(404).json({ detail: "User not found" });
   }
+
+  if (username !== undefined && username.trim()) {
+    const trimmed = username.trim();
+    const existing = db.users.find(
+      (u) => u.id !== req.user!.id && u.username.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (existing) {
+      return res.status(400).json({ detail: "Username is already taken" });
+    }
+    db.users[userIdx].username = trimmed;
+  }
+
+  if (display_name !== undefined && display_name.trim()) {
+    db.users[userIdx].display_name = display_name.trim();
+  }
+  if (avatar_color !== undefined) {
+    db.users[userIdx].avatar_color = avatar_color;
+  }
+
+  if (map_style !== undefined) {
+    const allowed = [
+      "osm",
+      "openfree_positron",
+      "openfree_bright",
+      "openfree_liberty",
+      "openfree_dark",
+      "openfree_fiord",
+      "carto_voyager",
+      "carto_positron",
+      "carto_dark"
+    ];
+    if (allowed.includes(map_style)) {
+      db.users[userIdx].map_style = map_style;
+    } else {
+      return res.status(400).json({ detail: "Invalid map_style value" });
+    }
+  }
+
+  if (map_selected_icon_size !== undefined && typeof map_selected_icon_size === "number") {
+    db.users[userIdx].map_selected_icon_size = Math.max(24, Math.min(72, map_selected_icon_size));
+  }
+  if (map_unselected_icon_size !== undefined && typeof map_unselected_icon_size === "number") {
+    db.users[userIdx].map_unselected_icon_size = Math.max(24, Math.min(72, map_unselected_icon_size));
+  }
+
+  if (share_location !== undefined) {
+    db.users[userIdx].share_location = Boolean(share_location);
+  }
+  if (save_location_history !== undefined) {
+    db.users[userIdx].save_location_history = Boolean(save_location_history);
+  }
+  if (history_retention !== undefined) {
+    db.users[userIdx].history_retention = history_retention;
+    cleanupHistoryForUser(db, db.users[userIdx].id, history_retention);
+  }
+  if (location_update_frequency !== undefined) {
+    db.users[userIdx].location_update_frequency = location_update_frequency;
+  }
+
+  if (notify_push !== undefined) db.users[userIdx].notify_push = Boolean(notify_push);
+  if (notify_arrival_departure !== undefined) db.users[userIdx].notify_arrival_departure = Boolean(notify_arrival_departure);
+  if (notify_stop_sharing !== undefined) db.users[userIdx].notify_stop_sharing = Boolean(notify_stop_sharing);
+  if (notify_low_battery !== undefined) db.users[userIdx].notify_low_battery = Boolean(notify_low_battery);
+  if (notify_device_offline !== undefined) db.users[userIdx].notify_device_offline = Boolean(notify_device_offline);
+
+  saveDB(db);
+  res.json(formatUserResponse(db.users[userIdx]));
 });
 
 const handleUpload = (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -780,16 +875,7 @@ app.post(["/api/auth/profile/picture", "/api/auth/profile-picture"], authenticat
   const pictureUrl = `/uploads/profile_pictures/${req.file.filename}`;
   db.users[userIdx].profile_picture_url = pictureUrl;
   saveDB(db);
-  const updated = db.users[userIdx];
-  res.json({
-    id: updated.id,
-    username: updated.username,
-    display_name: updated.display_name,
-    avatar_color: updated.avatar_color,
-    profile_picture_url: updated.profile_picture_url,
-    map_style: updated.map_style || "osm",
-    is_active: true
-  });
+  res.json(formatUserResponse(db.users[userIdx]));
 });
 
 app.delete(["/api/auth/profile/picture", "/api/auth/profile-picture"], authenticateToken, (req: AuthRequest, res: Response) => {
@@ -806,16 +892,7 @@ app.delete(["/api/auth/profile/picture", "/api/auth/profile-picture"], authentic
       db.users[userIdx].profile_picture_url = null;
       saveDB(db);
     }
-    const updated = db.users[userIdx];
-    res.json({
-      id: updated.id,
-      username: updated.username,
-      display_name: updated.display_name,
-      avatar_color: updated.avatar_color,
-      profile_picture_url: null,
-      map_style: updated.map_style || "osm",
-      is_active: true
-    });
+    res.json(formatUserResponse(db.users[userIdx]));
   } else {
     res.status(404).json({ detail: "User not found" });
   }
@@ -834,19 +911,36 @@ app.get("/api/circles", authenticateToken, (req: AuthRequest, res) => {
 
 app.post("/api/circles", authenticateToken, (req: AuthRequest, res) => {
   const { name } = req.body;
-  if (!name) return res.status(400).json({ detail: "Circle name required" });
+  if (!name || !name.trim()) return res.status(400).json({ detail: "Circle name required" });
 
   db = loadDB();
+  const userId = req.user!.id;
+
+  // Single circle constraint: remove user from existing circle first
+  const existingCircleIds = db.circle_members
+    .filter((m) => m.user_id === userId)
+    .map((m) => m.circle_id);
+
+  db.circle_members = db.circle_members.filter((m) => m.user_id !== userId);
+
+  // If old circle has no members left, delete it automatically
+  existingCircleIds.forEach((oldId) => {
+    const remaining = db.circle_members.filter((m) => m.circle_id === oldId);
+    if (remaining.length === 0) {
+      db.circles = db.circles.filter((c) => c.id !== oldId);
+    }
+  });
+
   const newCircle: CircleData = {
-    id: db.circles.length + 1,
-    name,
-    owner_id: req.user!.id,
-    invite_code: "YIMLY-" + crypto.randomBytes(3).toString("hex").toUpperCase(),
+    id: db.circles.length > 0 ? Math.max(...db.circles.map((c) => c.id)) + 1 : 1,
+    name: name.trim(),
+    owner_id: userId,
+    invite_code: crypto.randomBytes(3).toString("hex").toUpperCase(),
     created_at: new Date().toISOString()
   };
 
   db.circles.push(newCircle);
-  db.circle_members.push({ circle_id: newCircle.id, user_id: req.user!.id });
+  db.circle_members.push({ circle_id: newCircle.id, user_id: userId });
   saveDB(db);
 
   res.json(newCircle);
@@ -854,7 +948,7 @@ app.post("/api/circles", authenticateToken, (req: AuthRequest, res) => {
 
 app.post("/api/circles/join", authenticateToken, (req: AuthRequest, res) => {
   const { invite_code } = req.body;
-  if (!invite_code) return res.status(400).json({ detail: "Invite code required" });
+  if (!invite_code || !invite_code.trim()) return res.status(400).json({ detail: "Invite code required" });
 
   db = loadDB();
   const circle = db.circles.find(
@@ -865,14 +959,26 @@ app.post("/api/circles/join", authenticateToken, (req: AuthRequest, res) => {
     return res.status(404).json({ detail: "Circle not found with this invite code" });
   }
 
-  const isMember = db.circle_members.some(
-    (m) => m.circle_id === circle.id && m.user_id === req.user!.id
-  );
+  const userId = req.user!.id;
 
-  if (!isMember) {
-    db.circle_members.push({ circle_id: circle.id, user_id: req.user!.id });
-    saveDB(db);
-  }
+  // Remove from existing circles first (user is in exactly ONE circle at a time)
+  const existingCircleIds = db.circle_members
+    .filter((m) => m.user_id === userId)
+    .map((m) => m.circle_id);
+
+  db.circle_members = db.circle_members.filter((m) => m.user_id !== userId);
+
+  existingCircleIds.forEach((oldId) => {
+    if (oldId !== circle.id) {
+      const remaining = db.circle_members.filter((m) => m.circle_id === oldId);
+      if (remaining.length === 0) {
+        db.circles = db.circles.filter((c) => c.id !== oldId);
+      }
+    }
+  });
+
+  db.circle_members.push({ circle_id: circle.id, user_id: userId });
+  saveDB(db);
 
   res.json(circle);
 });
@@ -880,6 +986,7 @@ app.post("/api/circles/join", authenticateToken, (req: AuthRequest, res) => {
 app.post("/api/circles/:id/leave", authenticateToken, (req: AuthRequest, res) => {
   const circleId = Number(req.params.id);
   db = loadDB();
+  const userId = req.user!.id;
 
   const circle = db.circles.find((c) => c.id === circleId);
   if (!circle) {
@@ -887,30 +994,29 @@ app.post("/api/circles/:id/leave", authenticateToken, (req: AuthRequest, res) =>
   }
 
   const isMember = db.circle_members.some(
-    (m) => m.circle_id === circleId && m.user_id === req.user!.id
+    (m) => m.circle_id === circleId && m.user_id === userId
   );
 
   if (!isMember) {
     return res.status(400).json({ detail: "You are not a member of this circle" });
   }
 
-  // Owner protection: Circle owner cannot leave if the circle requires an owner
-  if (circle.owner_id === req.user!.id) {
-    return res.status(400).json({
-      detail: "As the circle owner, you cannot leave this circle. Circle owners cannot leave their own circle."
-    });
-  }
-
-  // Remove membership for this user only
+  // Remove membership for this user (no admin/owner restrictions - all members equal)
   db.circle_members = db.circle_members.filter(
-    (m) => !(m.circle_id === circleId && m.user_id === req.user!.id)
+    (m) => !(m.circle_id === circleId && m.user_id === userId)
   );
+
+  // If last member left, delete circle automatically
+  const remaining = db.circle_members.filter((m) => m.circle_id === circleId);
+  if (remaining.length === 0) {
+    db.circles = db.circles.filter((c) => c.id !== circleId);
+  }
   saveDB(db);
 
   res.json({ success: true, message: `Successfully left ${circle.name}` });
 });
 
-// Delete Family Circle (Owner/Admin only)
+// Delete Family Circle
 app.delete("/api/circles/:id", authenticateToken, (req: AuthRequest, res) => {
   const circleId = Number(req.params.id);
   db = loadDB();
@@ -920,21 +1026,13 @@ app.delete("/api/circles/:id", authenticateToken, (req: AuthRequest, res) => {
     return res.status(404).json({ detail: "Family Circle not found" });
   }
 
-  // Strictly enforce server-side authorization: Only circle owner/admin can delete
-  if (circle.owner_id !== req.user!.id) {
-    return res.status(403).json({
-      detail: "Forbidden: Only the Family Circle owner or administrator can delete this circle."
-    });
-  }
-
-  // Delete ONLY this specific circle and its membership bindings
   db.circles = db.circles.filter((c) => c.id !== circleId);
   db.circle_members = db.circle_members.filter((m) => m.circle_id !== circleId);
   saveDB(db);
 
   res.json({
     success: true,
-    message: `Family Circle "${circle.name}" has been permanently deleted.`
+    message: `Family Circle "${circle.name}" has been deleted.`
   });
 });
 
@@ -947,28 +1045,23 @@ app.post("/api/circles/:id/delete", authenticateToken, (req: AuthRequest, res) =
     return res.status(404).json({ detail: "Family Circle not found" });
   }
 
-  if (circle.owner_id !== req.user!.id) {
-    return res.status(403).json({
-      detail: "Forbidden: Only the Family Circle owner or administrator can delete this circle."
-    });
-  }
-
   db.circles = db.circles.filter((c) => c.id !== circleId);
   db.circle_members = db.circle_members.filter((m) => m.circle_id !== circleId);
   saveDB(db);
 
   res.json({
     success: true,
-    message: `Family Circle "${circle.name}" has been permanently deleted.`
+    message: `Family Circle "${circle.name}" has been deleted.`
   });
 });
 
 app.get("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) => {
   const circleId = Number(req.params.id);
   db = loadDB();
+  const currentUserId = req.user!.id;
 
   const isMember = db.circle_members.some(
-    (m) => m.circle_id === circleId && m.user_id === req.user!.id
+    (m) => m.circle_id === circleId && m.user_id === currentUserId
   );
 
   if (!isMember) {
@@ -982,22 +1075,46 @@ app.get("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) =
   const members = db.users
     .filter((u) => memberUserIds.includes(u.id))
     .map((member) => {
+      const isSelf = member.id === currentUserId;
+
+      // If user disabled location sharing and viewer is another member, hide devices
+      if (member.share_location === false && !isSelf) {
+        return {
+          id: member.id,
+          username: member.username,
+          display_name: member.display_name,
+          avatar_color: member.avatar_color || "#E2D9F3",
+          profile_picture_url: member.profile_picture_url || null,
+          devices: []
+        };
+      }
+
       // Find real device tracker telemetry sent for this user
       const userTrackers = db.entity_states.filter(
         (e) => e.user_id === member.id && e.domain === "device_tracker"
       );
 
-      // Extract valid real locations (latitude and longitude must be real numbers)
-      const devices = userTrackers
+      // Filter by location_visibility: "me_only" devices are hidden from other circle members
+      const visibleTrackers = userTrackers.filter((dt) => {
+        if (isSelf) return true;
+        const vis = dt.attributes?.location_visibility || "family";
+        return vis !== "me_only";
+      });
+
+      // Extract valid real locations
+      const devices = visibleTrackers
         .filter((dt) => dt.latitude != null && dt.longitude != null)
         .map((dt) => ({
           entity_id: dt.entity_id,
           device_name: dt.attributes?.friendly_name || dt.entity_id,
           latitude: dt.latitude!,
           longitude: dt.longitude!,
-          battery: dt.attributes?.battery_level || 100,
-          accuracy: dt.attributes?.gps_accuracy || 0,
-          last_updated: dt.last_updated
+          battery: dt.attributes?.battery_level ?? 100,
+          accuracy: dt.attributes?.gps_accuracy ?? 0,
+          last_updated: dt.last_updated,
+          platform: dt.attributes?.platform || "Android",
+          location_visibility: dt.attributes?.location_visibility || "family",
+          map_icon: dt.attributes?.map_icon || "📱 Phone"
         }));
 
       return {
@@ -1006,11 +1123,111 @@ app.get("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) =
         display_name: member.display_name,
         avatar_color: member.avatar_color || "#E2D9F3",
         profile_picture_url: member.profile_picture_url || null,
-        devices // Returns [] if no real telemetry has been received from the Companion App
+        devices
       };
     });
 
   res.json(members);
+});
+
+// Devices API
+app.get("/api/devices", authenticateToken, (req: AuthRequest, res) => {
+  db = loadDB();
+  const userId = req.user!.id;
+  let userTrackers = db.entity_states.filter(
+    (e) => e.user_id === userId && e.domain === "device_tracker"
+  );
+
+  // If user has no devices yet, provision primary device tracker
+  if (userTrackers.length === 0) {
+    const primaryDevice: EntityStateData = {
+      entity_id: `device_tracker.user_${userId}_phone`,
+      user_id: userId,
+      domain: "device_tracker",
+      state: "home",
+      attributes: {
+        friendly_name: `${req.user!.display_name}'s Phone`,
+        battery_level: 95,
+        gps_accuracy: 5,
+        platform: "Android",
+        location_visibility: "family",
+        map_icon: "📱 Phone"
+      },
+      latitude: 37.7749,
+      longitude: -122.4194,
+      last_updated: new Date().toISOString()
+    };
+    db.entity_states.push(primaryDevice);
+    saveDB(db);
+    userTrackers = [primaryDevice];
+  }
+
+  const result = userTrackers.map((dt) => ({
+    entity_id: dt.entity_id,
+    name: dt.attributes?.friendly_name || dt.entity_id,
+    platform: dt.attributes?.platform || "Android",
+    battery: dt.attributes?.battery_level ?? 100,
+    state: dt.state || "home",
+    last_updated: dt.last_updated,
+    location_visibility: (dt.attributes?.location_visibility || "family") as "family" | "me_only",
+    map_icon: dt.attributes?.map_icon || "📱 Phone"
+  }));
+
+  res.json(result);
+});
+
+app.put("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) => {
+  const { name, location_visibility, map_icon } = req.body;
+  db = loadDB();
+  const entityId = req.params.entity_id;
+  const dtIndex = db.entity_states.findIndex(
+    (e) => e.entity_id === entityId && e.user_id === req.user!.id
+  );
+
+  if (dtIndex === -1) {
+    return res.status(404).json({ detail: "Device not found" });
+  }
+
+  if (!db.entity_states[dtIndex].attributes) {
+    db.entity_states[dtIndex].attributes = {};
+  }
+
+  if (name !== undefined && String(name).trim()) {
+    db.entity_states[dtIndex].attributes.friendly_name = String(name).trim();
+  }
+  if (location_visibility !== undefined) {
+    db.entity_states[dtIndex].attributes.location_visibility =
+      location_visibility === "me_only" ? "me_only" : "family";
+  }
+  if (map_icon !== undefined) {
+    db.entity_states[dtIndex].attributes.map_icon = map_icon;
+  }
+
+  db.entity_states[dtIndex].last_updated = new Date().toISOString();
+  saveDB(db);
+
+  const updated = db.entity_states[dtIndex];
+  res.json({
+    entity_id: updated.entity_id,
+    name: updated.attributes?.friendly_name || updated.entity_id,
+    platform: updated.attributes?.platform || "Android",
+    battery: updated.attributes?.battery_level ?? 100,
+    state: updated.state || "home",
+    last_updated: updated.last_updated,
+    location_visibility: updated.attributes?.location_visibility || "family",
+    map_icon: updated.attributes?.map_icon || "📱 Phone"
+  });
+});
+
+app.get("/api/mobile_app/config", authenticateToken, (req: AuthRequest, res) => {
+  db = loadDB();
+  const u = db.users.find((user) => user.id === req.user!.id);
+  res.json({
+    share_location: u ? u.share_location !== false : true,
+    update_frequency: u?.location_update_frequency || "realtime",
+    save_location_history: u ? u.save_location_history !== false : true,
+    history_retention: u?.history_retention || "30d"
+  });
 });
 
 // Home Assistant Companion App Webhook & Telemetry Receiver
@@ -1026,6 +1243,7 @@ app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, re
     const accuracy = data?.location?.gps_accuracy ?? req.body.gps_accuracy ?? 5;
     const entityId = req.body.entity_id || data?.entity_id || "device_tracker.mobile_app";
     const userId = req.body.user_id || (db.users[0] ? db.users[0].id : 1);
+    const targetUser = db.users.find((u) => u.id === userId);
 
     if (lat != null && lon != null) {
       const now = new Date().toISOString();
@@ -1037,9 +1255,12 @@ app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, re
         domain: "device_tracker",
         state: "not_home",
         attributes: {
-          friendly_name: req.body.device_name || "Companion Phone",
+          friendly_name: req.body.device_name || existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.friendly_name : "Companion Phone",
           battery_level: battery,
-          gps_accuracy: accuracy
+          gps_accuracy: accuracy,
+          platform: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.platform || "Android" : "Android",
+          location_visibility: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.location_visibility || "family" : "family",
+          map_icon: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.map_icon || "📱 Phone" : "📱 Phone"
         },
         latitude: Number(lat),
         longitude: Number(lon),
@@ -1052,17 +1273,20 @@ app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, re
         db.entity_states.push(updatedState);
       }
 
-      // Record location history
-      db.location_history.push({
-        id: crypto.randomBytes(8).toString("hex"),
-        entity_id: entityId,
-        user_id: userId,
-        latitude: Number(lat),
-        longitude: Number(lon),
-        battery_level: battery,
-        accuracy,
-        timestamp: now
-      });
+      // Record location history only if user has enabled location history
+      if (!targetUser || targetUser.save_location_history !== false) {
+        db.location_history.push({
+          id: crypto.randomBytes(8).toString("hex"),
+          entity_id: entityId,
+          user_id: userId,
+          latitude: Number(lat),
+          longitude: Number(lon),
+          battery_level: battery,
+          accuracy,
+          timestamp: now
+        });
+        cleanupHistoryForUser(db, userId, targetUser?.history_retention);
+      }
 
       saveDB(db);
 
