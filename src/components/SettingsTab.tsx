@@ -6,6 +6,7 @@ import { MAP_STYLES } from "../lib/mapStyles";
 import { MAP_PIN_TYPES, renderMarkerHTML } from "../lib/markerRenderer";
 import { MapLivePreview } from "./MapLivePreview";
 import { QRScannerModal } from "./QRScannerModal";
+import { DeviceIcon } from "./DeviceIcon";
 import {
   User,
   Users,
@@ -383,14 +384,88 @@ const CustomColorPickerPopover: React.FC<CustomColorPickerPopoverProps> = ({
 };
 
 const DEVICE_ICONS = [
-  "📱 Phone",
-  "📟 Tablet",
-  "💻 Laptop",
-  "🖥 Desktop",
-  "⌚ Watch",
-  "🚗 Car",
-  "📍 Custom"
+  "Phone",
+  "Tablet",
+  "Laptop",
+  "Desktop",
+  "Watch",
+  "Car",
+  "Custom"
 ];
+
+interface DeviceIconSelectProps {
+  value: string;
+  onChange: (val: string) => void;
+}
+
+const DeviceIconSelect: React.FC<DeviceIconSelectProps> = ({ value, onChange }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const handleSelect = (icon: string) => {
+    onChange(icon);
+    setIsOpen(false);
+  };
+
+  const cleanValue = value.replace(/[^\w\s]/g, "").trim() || "Phone";
+
+  return (
+    <div className="relative w-full text-slate-800" ref={dropdownRef}>
+      {/* Trigger Button - Closed Dropdown State */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between px-3.5 py-2.5 bg-white border border-slate-200/80 rounded-xl text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 shadow-xs cursor-pointer text-left"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-indigo-50/80 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0">
+            <DeviceIcon deviceIcon={cleanValue} className="w-4.5 h-4.5 text-indigo-600" />
+          </div>
+          <span className="font-semibold text-slate-800">{cleanValue}</span>
+        </div>
+        <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
+      </button>
+
+      {/* Dropdown Options List - Open State */}
+      {isOpen && (
+        <div className="absolute z-50 mt-1.5 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-64 overflow-y-auto py-1 animate-in fade-in slide-in-from-top-1 duration-150">
+          {DEVICE_ICONS.map((icon) => {
+            const isSelected = cleanValue === icon;
+            return (
+              <button
+                key={icon}
+                type="button"
+                onClick={() => handleSelect(icon)}
+                className={`w-full flex items-center gap-3 px-3.5 py-2 text-left text-sm font-semibold transition cursor-pointer hover:bg-indigo-50/50 ${
+                  isSelected ? "bg-indigo-50 text-indigo-600" : "text-slate-700"
+                }`}
+              >
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border ${
+                  isSelected ? "bg-indigo-100/50 border-indigo-200 text-indigo-600" : "bg-slate-50 border-slate-100/80 text-slate-500"
+                }`}>
+                  <DeviceIcon deviceIcon={icon} className="w-4.5 h-4.5" />
+                </div>
+                <span className={isSelected ? "text-indigo-600 font-bold" : "text-slate-700"}>
+                  {icon}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const SettingsTab: React.FC<SettingsTabProps> = ({
   user,
@@ -435,8 +510,56 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   // Photo state
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showPhotoModal, setShowPhotoModal] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [deletingPhoto, setDeletingPhoto] = useState(false);
+
+  // Cropper states
+  const [cropperImageSrc, setCropperImageSrc] = useState<string | null>(null);
+  const [cropperZoom, setCropperZoom] = useState(1);
+  const [cropperPosition, setCropperPosition] = useState({ x: 0, y: 0 });
+  const [cropperIsDragging, setCropperIsDragging] = useState(false);
+  const [cropperDragStart, setCropperDragStart] = useState({ x: 0, y: 0 });
+  const [cropperImageSize, setCropperImageSize] = useState({ width: 0, height: 0 });
+  const gestureRef = useRef({
+    isDragging: false,
+    dragStart: { x: 0, y: 0 },
+    initialPosition: { x: 0, y: 0 },
+    initialDistance: 0,
+    initialZoom: 1,
+    isPinch: false
+  });
+
+  const cropperContainerRef = useRef<HTMLDivElement>(null);
+  const cropperImageRef = useRef<HTMLImageElement>(null);
+  const cropperGuideRef = useRef<HTMLDivElement>(null);
+  const [cropGuidePosition, setCropGuidePosition] = useState({ x: 44, y: 44 });
+
+  useEffect(() => {
+    if (cropperImageSrc && cropperImageSize.width > 0) {
+      const timer = setTimeout(() => {
+        const container = cropperContainerRef.current;
+        const imgEl = cropperImageRef.current;
+        if (container && imgEl) {
+          const containerRect = container.getBoundingClientRect();
+          const imgRect = imgEl.getBoundingClientRect();
+          
+          // Calculate the exact center of the rendered image relative to the container origin
+          const imageCenterX = (imgRect.left + imgRect.width / 2) - containerRect.left;
+          const imageCenterY = (imgRect.top + imgRect.height / 2) - containerRect.top;
+          
+          // Center the 192px crop guide exactly over the image's center
+          const guideLeft = imageCenterX - 96;
+          const guideTop = imageCenterY - 96;
+          
+          setCropGuidePosition({ x: guideLeft, y: guideTop });
+        }
+      }, 50);
+      return () => clearTimeout(timer);
+    } else {
+      setCropGuidePosition({ x: 44, y: 44 });
+    }
+  }, [cropperImageSrc, cropperImageSize]);
 
   // Password Modal
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -526,7 +649,16 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     }
   };
 
-  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const resetCropper = () => {
+    setCropperImageSrc(null);
+    setCropperZoom(1);
+    setCropperPosition({ x: 0, y: 0 });
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -535,12 +667,136 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       return;
     }
 
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const src = event.target?.result as string;
+      setCropperImageSrc(src);
+      setCropperZoom(1);
+      setCropperPosition({ x: 0, y: 0 });
+
+      // Calculate initial cover scale image size
+      const img = new Image();
+      img.onload = () => {
+        const containerSize = 280;
+        const ratio = img.naturalWidth / img.naturalHeight;
+        let w = containerSize;
+        let h = containerSize;
+        if (ratio > 1) {
+          w = containerSize * ratio;
+        } else {
+          h = containerSize / ratio;
+        }
+        setCropperImageSize({ width: w, height: h });
+      };
+      // CRITICAL: Registered onload before assigning src to prevent race conditions
+      img.src = src;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSaveCroppedImage = async () => {
+    if (!cropperImageSrc) return;
     setUploadingPhoto(true);
     setAccountError(null);
 
     try {
+      // 1. Create a new Image object and register onload first
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = cropperImageSrc; // Set src AFTER onload is registered to guarantee execution!
+      });
+
+      // 2. Create canvas
+      const canvas = document.createElement("canvas");
+      canvas.width = 512;
+      canvas.height = 512;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        throw new Error("Failed to get 2D context");
+      }
+
+      // Exact pixel-for-pixel coordinate mapping from screen coordinates to the natural image
+      const imgEl = cropperImageRef.current;
+      const guideEl = cropperGuideRef.current;
+
+      let sx = 0;
+      let sy = 0;
+      let sWidth = img.naturalWidth;
+      let sHeight = img.naturalHeight;
+
+      if (imgEl && guideEl) {
+        const imgRect = imgEl.getBoundingClientRect();
+        const guideRect = guideEl.getBoundingClientRect();
+
+        // Calculate position of the crop guide relative to the rendered image on screen
+        const xInRenderedImage = guideRect.left - imgRect.left;
+        const yInRenderedImage = guideRect.top - imgRect.top;
+
+        // Scale factor to map screen coordinates to original image coordinates
+        const scaleX = img.naturalWidth / imgRect.width;
+        const scaleY = img.naturalHeight / imgRect.height;
+
+        // Crop box coordinates on the original image
+        sx = xInRenderedImage * scaleX;
+        sy = yInRenderedImage * scaleY;
+        sWidth = guideRect.width * scaleX;
+        sHeight = guideRect.height * scaleY;
+      } else {
+        // Fallback calculations using state
+        const containerCenter = 140; // 280 / 2
+        const cropRadius = 96; // 192 / 2
+
+        const baseW = cropperImageSize.width;
+        const baseH = cropperImageSize.height;
+        const renderedW = baseW * cropperZoom;
+        const renderedH = baseH * cropperZoom;
+
+        const imageCenterX = containerCenter + cropperPosition.x;
+        const imageCenterY = containerCenter + cropperPosition.y;
+
+        const imageLeft = imageCenterX - renderedW / 2;
+        const imageTop = imageCenterY - renderedH / 2;
+
+        const cropLeft = cropGuidePosition.x;
+        const cropTop = cropGuidePosition.y;
+
+        const xInImagePixels = cropLeft - imageLeft;
+        const yInImagePixels = cropTop - imageTop;
+
+        const scaleToNaturalX = img.naturalWidth / renderedW;
+        const scaleToNaturalY = img.naturalHeight / renderedH;
+
+        sx = xInImagePixels * scaleToNaturalX;
+        sy = yInImagePixels * scaleToNaturalY;
+        sWidth = 192 * scaleToNaturalX;
+        sHeight = 192 * scaleToNaturalY;
+      }
+
+      // Draw the exact sub-rectangle from the natural image onto the 512x512 canvas
+      ctx.clearRect(0, 0, 512, 512);
+      ctx.drawImage(img, sx, sy, sWidth, sHeight, 0, 0, 512, 512);
+
+      // 3. Compress/encode to JPEG with a good compression quality (0.85)
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob(
+          (b) => resolve(b),
+          "image/jpeg",
+          0.85
+        );
+      });
+
+      if (!blob) {
+        throw new Error("Failed to export canvas to Blob");
+      }
+
+      // Create a File object from the blob
+      const processedFile = new File([blob], "profile_photo.jpg", { type: "image/jpeg" });
+
+      // 4. Send the processed file to the upload endpoint
       const formData = new FormData();
-      formData.append("picture", file);
+      formData.append("file", processedFile);
       const token = getToken();
 
       const res = await fetch("/api/auth/profile/picture", {
@@ -560,12 +816,115 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       onUserUpdate?.(updated);
       setAccountSuccess("Profile photo updated!");
       setTimeout(() => setAccountSuccess(null), 3000);
+      resetCropper();
+      setShowPhotoModal(false);
     } catch (err: any) {
-      setAccountError(err.message || "Failed to upload profile photo");
+      setAccountError(err.message || "Failed to crop or upload photo");
     } finally {
       setUploadingPhoto(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
+  };
+
+  // DESKTOP: Mouse drag handlers
+  const handleMouseDown = (e: React.MouseEvent) => {
+    setCropperIsDragging(true);
+    setCropperDragStart({
+      x: e.clientX - cropperPosition.x,
+      y: e.clientY - cropperPosition.y
+    });
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!cropperIsDragging) return;
+    setCropperPosition({
+      x: e.clientX - cropperDragStart.x,
+      y: e.clientY - cropperDragStart.y
+    });
+  };
+
+  const handleMouseUp = () => {
+    setCropperIsDragging(false);
+  };
+
+  // TOUCH DEVICES: Smooth pinch-to-zoom and pan handlers
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+
+    if (e.touches.length === 1) {
+      gestureRef.current.isDragging = true;
+      gestureRef.current.isPinch = false;
+      const t = e.touches[0];
+      gestureRef.current.dragStart = {
+        x: t.clientX - cropperPosition.x,
+        y: t.clientY - cropperPosition.y
+      };
+    } else if (e.touches.length === 2) {
+      gestureRef.current.isDragging = false;
+      gestureRef.current.isPinch = true;
+
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+
+      const dx = t1.clientX - t2.clientX;
+      const dy = t1.clientY - t2.clientY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      gestureRef.current.initialDistance = dist;
+      gestureRef.current.initialZoom = cropperZoom;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+
+    if (e.touches.length === 1 && gestureRef.current.isDragging) {
+      const t = e.touches[0];
+      setCropperPosition({
+        x: t.clientX - gestureRef.current.dragStart.x,
+        y: t.clientY - gestureRef.current.dragStart.y
+      });
+    } else if (e.touches.length === 2 && gestureRef.current.isPinch) {
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+
+      const dx = t1.clientX - t2.clientX;
+      const dy = t1.clientY - t2.clientY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (gestureRef.current.initialDistance > 0) {
+        const factor = dist / gestureRef.current.initialDistance;
+        const newZoom = Math.min(4, Math.max(1, gestureRef.current.initialZoom * factor));
+        setCropperZoom(newZoom);
+      }
+    }
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (e.touches.length === 0) {
+      gestureRef.current.isDragging = false;
+      gestureRef.current.isPinch = false;
+    } else if (e.touches.length === 1) {
+      gestureRef.current.isPinch = false;
+      gestureRef.current.isDragging = true;
+      const t = e.touches[0];
+      gestureRef.current.dragStart = {
+        x: t.clientX - cropperPosition.x,
+        y: t.clientY - cropperPosition.y
+      };
+    }
+  };
+
+  // MOUSE WHEEL: Smooth mouse wheel / trackpad zooming
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const zoomFactor = 0.05;
+    const direction = e.deltaY < 0 ? 1 : -1;
+    const newZoom = Math.min(4, Math.max(1, cropperZoom + direction * zoomFactor));
+    setCropperZoom(newZoom);
   };
 
   const handleDeletePhoto = async () => {
@@ -1073,13 +1432,16 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 <input
                   type="file"
                   ref={fileInputRef}
-                  onChange={handlePhotoUpload}
+                  onChange={(e) => {
+                    handleFileSelect(e);
+                    setShowPhotoModal(true);
+                  }}
                   accept="image/*"
                   className="hidden"
                 />
                 <button
                   type="button"
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={() => setShowPhotoModal(true)}
                   disabled={uploadingPhoto}
                   id="change-photo-btn"
                   className="px-4 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold border border-slate-200/80 shadow-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
@@ -1977,8 +2339,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                     {/* Device Header & Name */}
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-200/50">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-lg shadow-2xs">
-                          {device.map_icon ? device.map_icon.split(" ")[0] : "📱"}
+                        <div className="w-10 h-10 rounded-xl bg-indigo-50/80 border border-indigo-100 flex items-center justify-center text-indigo-600 shadow-2xs shrink-0">
+                          <DeviceIcon deviceIcon={device.map_icon} deviceName={device.name} className="w-5.5 h-5.5 text-indigo-600" />
                         </div>
                         <div>
                           {isEditing ? (
@@ -2123,22 +2485,12 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                       <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
                         Map Icon
                       </label>
-                      <div className="relative">
-                        <select
-                          value={device.map_icon || "📱 Phone"}
-                          onChange={(e) =>
-                            handleUpdateDevice(device.entity_id, { map_icon: e.target.value })
-                          }
-                          className="w-full appearance-none px-3.5 py-2.5 bg-white border border-slate-200/80 rounded-xl text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 shadow-xs cursor-pointer pr-10"
-                        >
-                          {DEVICE_ICONS.map((icon) => (
-                            <option key={icon} value={icon}>
-                              {icon}
-                            </option>
-                          ))}
-                        </select>
-                        <ChevronDown className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                      </div>
+                      <DeviceIconSelect
+                        value={device.map_icon || "📱 Phone"}
+                        onChange={(val) =>
+                          handleUpdateDevice(device.entity_id, { map_icon: val })
+                        }
+                      />
                     </div>
 
                     {/* Allow Find My Device Toggle */}
@@ -2176,9 +2528,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       {/* ======================================================== */}
 
       {/* Change Password Modal */}
-      {showPasswordModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+      {showPasswordModal && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200 overflow-y-auto pointer-events-auto">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <button
               onClick={() => {
                 setShowPasswordModal(false);
@@ -2289,13 +2641,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Join Circle Modal */}
-      {showJoinModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+      {showJoinModal && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200 overflow-y-auto pointer-events-auto">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <button
               onClick={() => {
                 setShowJoinModal(false);
@@ -2367,13 +2720,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Create Circle Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+      {showCreateModal && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200 overflow-y-auto pointer-events-auto">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <button
               onClick={() => {
                 setShowCreateModal(false);
@@ -2434,13 +2788,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Switch Circle Warning Modal */}
-      {showSwitchWarning && selectedCircle && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+      {showSwitchWarning && selectedCircle && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200 overflow-y-auto pointer-events-auto">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mb-3">
               <AlertCircle className="w-6 h-6" />
             </div>
@@ -2479,13 +2834,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Leave Circle Confirmation Modal */}
-      {showLeaveConfirm && selectedCircle && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative">
+      {showLeaveConfirm && selectedCircle && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200 overflow-y-auto pointer-events-auto">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mb-3">
               <LogOut className="w-6 h-6" />
             </div>
@@ -2515,7 +2871,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* QR Scanner Modal */}
@@ -2528,6 +2885,198 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           setShowJoinModal(true);
         }}
       />
+
+      {/* Upload Photo Modal */}
+      {showPhotoModal && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200 overflow-y-auto pointer-events-auto">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
+            <button
+              onClick={() => {
+                resetCropper();
+                setShowPhotoModal(false);
+              }}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-3">
+              <Camera className="w-6 h-6" />
+            </div>
+
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileSelect}
+              accept="image/*"
+              className="hidden"
+            />
+
+            {cropperImageSrc ? (
+              <>
+                <h3 className="text-base font-bold text-slate-800">Crop Profile Photo</h3>
+                <p className="text-xs text-slate-400 mt-1 mb-4">
+                  Drag to position, use the slider to zoom.
+                </p>
+
+                {/* Interactive Cropper Panel */}
+                <div
+                  className="relative w-full aspect-square max-w-[280px] mx-auto overflow-hidden bg-slate-950 rounded-2xl select-none touch-none cursor-move border border-slate-100"
+                  onMouseDown={handleMouseDown}
+                  onMouseMove={handleMouseMove}
+                  onMouseUp={handleMouseUp}
+                  onMouseLeave={handleMouseUp}
+                  onTouchStart={handleTouchStart}
+                  onTouchMove={handleTouchMove}
+                  onTouchEnd={handleTouchEnd}
+                  onTouchCancel={handleTouchEnd}
+                  onWheel={handleWheel}
+                >
+                  {/* Inner Container that accommodates the guide's position */}
+                  <div
+                    ref={cropperContainerRef}
+                    className="w-full h-full relative"
+                    style={{
+                      transform: `translate(${44 - cropGuidePosition.x}px, ${44 - cropGuidePosition.y}px)`,
+                    }}
+                  >
+                    <img
+                      ref={cropperImageRef}
+                      src={cropperImageSrc}
+                      alt="Crop preview"
+                      className="max-w-none max-h-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none select-none"
+                      style={{
+                        width: cropperImageSize.width,
+                        height: cropperImageSize.height,
+                        transform: `translate(calc(-50% + ${cropperPosition.x}px), calc(-50% + ${cropperPosition.y}px)) scale(${cropperZoom})`,
+                      }}
+                    />
+                    {/* Overlay with 192px circular crop guide clear circle */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      <div
+                        ref={cropperGuideRef}
+                        className="w-48 h-48 rounded-full border-2 border-white/90 shadow-[0_0_0_9999px_rgba(15,23,42,0.6)] absolute"
+                        style={{
+                          left: `${cropGuidePosition.x}px`,
+                          top: `${cropGuidePosition.y}px`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Zoom Slider */}
+                <div className="mt-4 mb-5 px-1">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-500 mb-1.5">
+                    <span>Zoom</span>
+                    <span>{Math.round(cropperZoom * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="4"
+                    step="0.05"
+                    value={cropperZoom}
+                    onChange={(e) => setCropperZoom(parseFloat(e.target.value))}
+                    className="w-full accent-indigo-600 h-1 bg-slate-100 rounded-lg appearance-none cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-2.5">
+                  <button
+                    type="button"
+                    onClick={handleSaveCroppedImage}
+                    disabled={uploadingPhoto}
+                    className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {uploadingPhoto ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    <span>{uploadingPhoto ? "Saving & Uploading..." : "Save & Apply Photo"}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={resetCropper}
+                    disabled={uploadingPhoto}
+                    className="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-xs transition cursor-pointer disabled:opacity-50"
+                  >
+                    Choose Different Image
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 className="text-base font-bold text-slate-800">Profile Photo</h3>
+                <p className="text-xs text-slate-400 mt-1 mb-4">
+                  Upload a custom profile photo visible to your circle members
+                </p>
+
+                {/* Profile Photo Preview */}
+                <div className="flex flex-col items-center justify-center p-5 bg-slate-50/80 rounded-2xl border border-dashed border-slate-200 mb-5 text-center">
+                  <div
+                    className="w-20 h-20 rounded-full flex items-center justify-center text-white font-black text-2xl shadow-md border-2 border-white overflow-hidden mb-3.5 relative shrink-0"
+                    style={{ backgroundColor: avatarColor }}
+                  >
+                    {user?.profile_picture_url ? (
+                      <img
+                        src={user.profile_picture_url}
+                        alt={displayName}
+                        className="w-full h-full object-cover rounded-full"
+                      />
+                    ) : (
+                      <span>{(displayName || username || "U").charAt(0).toUpperCase()}</span>
+                    )}
+                  </div>
+                  <p className="text-xs font-bold text-slate-700 mb-0.5">
+                    {user?.profile_picture_url ? "Custom Photo Active" : "Default Avatar Active"}
+                  </p>
+                  <p className="text-[11px] text-slate-400 font-medium">
+                    Supports JPG, PNG, GIF, WebP (max 5MB)
+                  </p>
+                </div>
+
+                <div className="space-y-2.5">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadingPhoto}
+                    className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <Upload className="w-4 h-4" />
+                    <span>Choose Image to Crop</span>
+                  </button>
+
+                  {user?.profile_picture_url && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await handleDeletePhoto();
+                        setShowPhotoModal(false);
+                      }}
+                      disabled={deletingPhoto}
+                      className="w-full py-2.5 px-4 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      {deletingPhoto ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                      <span>Remove Custom Photo</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetCropper();
+                      setShowPhotoModal(false);
+                    }}
+                    className="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-xs transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
     </div>
   );
 };

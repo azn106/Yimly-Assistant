@@ -1135,7 +1135,7 @@ app.get("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) =
           last_updated: dt.last_updated,
           platform: dt.attributes?.platform || "Android",
           location_visibility: dt.attributes?.location_visibility || "family",
-          map_icon: dt.attributes?.map_icon || "📱 Phone",
+          map_icon: dt.attributes?.map_icon || "Phone",
           allow_find_my_device: dt.attributes?.allow_find_my_device !== false
         }));
 
@@ -1173,7 +1173,7 @@ app.get("/api/devices", authenticateToken, (req: AuthRequest, res) => {
         gps_accuracy: 5,
         platform: "Android",
         location_visibility: "family",
-        map_icon: "📱 Phone",
+        map_icon: "Phone",
         allow_find_my_device: true
       },
       latitude: 37.7749,
@@ -1193,7 +1193,7 @@ app.get("/api/devices", authenticateToken, (req: AuthRequest, res) => {
     state: dt.state || "home",
     last_updated: dt.last_updated,
     location_visibility: (dt.attributes?.location_visibility || "family") as "family" | "me_only",
-    map_icon: dt.attributes?.map_icon || "📱 Phone",
+    map_icon: dt.attributes?.map_icon || "Phone",
     allow_find_my_device: dt.attributes?.allow_find_my_device !== false
   }));
 
@@ -1242,7 +1242,7 @@ app.put("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) =>
     state: updated.state || "home",
     last_updated: updated.last_updated,
     location_visibility: updated.attributes?.location_visibility || "family",
-    map_icon: updated.attributes?.map_icon || "📱 Phone",
+    map_icon: updated.attributes?.map_icon || "Phone",
     allow_find_my_device: updated.attributes?.allow_find_my_device !== false
   });
 });
@@ -1335,7 +1335,7 @@ app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, re
           gps_accuracy: accuracy,
           platform: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.platform || "Android" : "Android",
           location_visibility: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.location_visibility || "family" : "family",
-          map_icon: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.map_icon || "📱 Phone" : "📱 Phone"
+          map_icon: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.map_icon || "Phone" : "Phone"
         },
         latitude: Number(lat),
         longitude: Number(lon),

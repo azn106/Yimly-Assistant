@@ -3,6 +3,8 @@
  * Supports 8 distinct, professionally crafted pin silhouettes with exact GPS geographic anchor alignment.
  */
 
+import { getDeviceIconSVGString } from "../components/DeviceIcon";
+
 export type MapPinType =
   | "classic_pin"
   | "circle"
@@ -137,7 +139,7 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
 
   const { width: W, height: H } = getMarkerDimensions(validPinType, size);
   const initial = memberName.charAt(0).toUpperCase() || "U";
-  const cleanDeviceIcon = deviceIcon ? deviceIcon.split(" ")[0] : "📱";
+  const deviceSVGMarkup = getDeviceIconSVGString(deviceIcon, memberName, "w-[65%] h-[65%] text-indigo-600");
   const hasBattery = showBattery && batteryLevel !== null && batteryLevel !== undefined && batteryLevel !== "";
   const batteryStr = hasBattery ? `${batteryLevel}%` : "";
 
@@ -547,10 +549,10 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
   const deviceBadge = `
     <div
       class="absolute -top-1 -left-1 bg-white text-slate-800 rounded-full shadow-xs border border-slate-200/90 flex items-center justify-center pointer-events-none z-10"
-      style="width: ${badgeSize}px; height: ${badgeSize}px; font-size: ${badgeFontSize}px;"
+      style="width: ${badgeSize}px; height: ${badgeSize}px;"
       title="Connected device"
     >
-      ${cleanDeviceIcon}
+      ${deviceSVGMarkup}
     </div>
   `;
 

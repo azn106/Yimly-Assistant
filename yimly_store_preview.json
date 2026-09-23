@@ -34,9 +34,9 @@
       "avatar_color": "#E2D9F3",
       "created_at": "2026-09-21T07:39:57.470Z",
       "map_style": "openfree_positron",
-      "profile_picture_url": "/uploads/profile_pictures/user_3_1790066158844_c1183aa3.jpg",
+      "profile_picture_url": "/uploads/profile_pictures/user_3_1790122032856_f527e306.jpg",
       "map_selected_icon_size": 72,
-      "map_unselected_icon_size": 42
+      "map_unselected_icon_size": 58
     },
     {
       "id": 4,
@@ -91,7 +91,8 @@
       "map_style": "openfree_positron",
       "map_selected_icon_size": 58,
       "map_unselected_icon_size": 42,
-      "created_at": "2026-09-22T08:33:50.411Z"
+      "created_at": "2026-09-22T08:33:50.411Z",
+      "profile_picture_url": "/uploads/profile_pictures/user_8_1790118788523_0fe63bc4.jpg"
     }
   ],
   "circles": [
@@ -189,7 +190,7 @@
         "battery_level": 95,
         "gps_accuracy": 5,
         "location_visibility": "family",
-        "map_icon": "📱 Phone"
+        "map_icon": "Phone"
       },
       "latitude": 37.7749,
       "longitude": -122.4194,
@@ -208,6 +209,42 @@
       "latitude": 37.7833,
       "longitude": -122.4167,
       "last_updated": "2026-09-21T06:41:22.503Z"
+    },
+    {
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "domain": "device_tracker",
+      "state": "home",
+      "attributes": {
+        "friendly_name": "Hort's Phone",
+        "battery_level": 95,
+        "gps_accuracy": 5,
+        "platform": "Android",
+        "location_visibility": "me_only",
+        "map_icon": "Phone",
+        "allow_find_my_device": true
+      },
+      "latitude": 37.7749,
+      "longitude": -122.4194,
+      "last_updated": "2026-09-22T22:57:21.437Z"
+    },
+    {
+      "entity_id": "device_tracker.user_3_phone",
+      "user_id": 3,
+      "domain": "device_tracker",
+      "state": "home",
+      "attributes": {
+        "friendly_name": "Houth's Phone",
+        "battery_level": 95,
+        "gps_accuracy": 5,
+        "platform": "Android",
+        "location_visibility": "family",
+        "map_icon": "Phone",
+        "allow_find_my_device": true
+      },
+      "latitude": 37.7749,
+      "longitude": -122.4194,
+      "last_updated": "2026-09-22T23:04:04.123Z"
     }
   ],
   "location_history": [
@@ -370,6 +407,126 @@
       "accuracy": 8,
       "battery_level": 44,
       "timestamp": "2026-09-20T12:28:36.511Z"
+    },
+    {
+      "id": "hist_u8_1",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.7599,
+      "longitude": -122.4148,
+      "accuracy": 5,
+      "battery_level": 98,
+      "timestamp": "2026-09-20T09:15:00.000Z"
+    },
+    {
+      "id": "hist_u8_2",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.7618,
+      "longitude": -122.4194,
+      "accuracy": 6,
+      "battery_level": 95,
+      "timestamp": "2026-09-20T11:30:00.000Z"
+    },
+    {
+      "id": "hist_u8_3",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.765,
+      "longitude": -122.421,
+      "accuracy": 7,
+      "battery_level": 90,
+      "timestamp": "2026-09-20T14:00:00.000Z"
+    },
+    {
+      "id": "hist_u8_4",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.7624,
+      "longitude": -122.4356,
+      "accuracy": 5,
+      "battery_level": 82,
+      "timestamp": "2026-09-20T17:45:00.000Z"
+    },
+    {
+      "id": "hist_u8_5",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.7694,
+      "longitude": -122.4862,
+      "accuracy": 6,
+      "battery_level": 100,
+      "timestamp": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "hist_u8_6",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.7731,
+      "longitude": -122.4682,
+      "accuracy": 7,
+      "battery_level": 92,
+      "timestamp": "2026-09-21T12:15:00.000Z"
+    },
+    {
+      "id": "hist_u8_7",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.7981,
+      "longitude": -122.4664,
+      "accuracy": 5,
+      "battery_level": 85,
+      "timestamp": "2026-09-21T14:30:00.000Z"
+    },
+    {
+      "id": "hist_u8_8",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.8077,
+      "longitude": -122.475,
+      "accuracy": 6,
+      "battery_level": 78,
+      "timestamp": "2026-09-21T16:45:00.000Z"
+    },
+    {
+      "id": "hist_u8_9",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.808,
+      "longitude": -122.4177,
+      "accuracy": 7,
+      "battery_level": 95,
+      "timestamp": "2026-09-22T08:30:00.000Z"
+    },
+    {
+      "id": "hist_u8_10",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.8083,
+      "longitude": -122.4098,
+      "accuracy": 5,
+      "battery_level": 89,
+      "timestamp": "2026-09-22T10:15:00.000Z"
+    },
+    {
+      "id": "hist_u8_11",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.7879,
+      "longitude": -122.4074,
+      "accuracy": 6,
+      "battery_level": 74,
+      "timestamp": "2026-09-22T13:45:00.000Z"
+    },
+    {
+      "id": "hist_u8_12",
+      "entity_id": "device_tracker.user_8_phone",
+      "user_id": 8,
+      "latitude": 37.7749,
+      "longitude": -122.4194,
+      "accuracy": 7,
+      "battery_level": 60,
+      "timestamp": "2026-09-22T17:00:00.000Z"
     }
   ]
 }

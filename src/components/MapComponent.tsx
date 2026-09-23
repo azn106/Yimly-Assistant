@@ -4,6 +4,7 @@ import * as maplibregl from "maplibre-gl";
 import { CircleMember, LocationHistoryItem, UserInfo, MemberDeviceLocation } from "../types";
 import { getMapStyle } from "../lib/mapStyles";
 import { renderMarkerHTML, getMarkerDimensions } from "../lib/markerRenderer";
+import { DeviceIcon } from "./DeviceIcon";
 import { 
   MapPin, 
   RefreshCw, 
@@ -2265,8 +2266,8 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                       {isSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
                     </div>
 
-                    <div className="w-9 h-9 rounded-xl bg-white border border-slate-200/70 flex items-center justify-center text-base shrink-0 shadow-2xs">
-                      {dev.map_icon ? dev.map_icon.split(" ")[0] : "📱"}
+                    <div className="w-9 h-9 rounded-xl bg-indigo-50/80 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0 shadow-2xs">
+                      <DeviceIcon deviceIcon={dev.map_icon} deviceName={dev.device_name} className="w-4.5 h-4.5 text-indigo-600" />
                     </div>
 
                     <div className="flex-1 min-w-0">

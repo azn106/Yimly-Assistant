@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { Circle, CircleMember, UserInfo } from "../types";
 import {
   Users,
@@ -316,9 +317,9 @@ export const CircleSelector: React.FC<CircleSelectorProps> = ({
       </div>
 
       {/* 3. MANAGE CIRCLE VIEW (MODAL) */}
-      {managingCircle && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm animate-in fade-in duration-150">
-          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto space-y-5">
+      {managingCircle && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-150 overflow-y-auto pointer-events-auto">
+          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto space-y-5">
             {/* Header */}
             <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-100">
               <div>
@@ -529,13 +530,14 @@ export const CircleSelector: React.FC<CircleSelectorProps> = ({
               )}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 4. LEAVE CIRCLE CONFIRMATION MODAL */}
-      {showLeaveConfirm && managingCircle && (
-        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm animate-in fade-in duration-150">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 text-center space-y-4">
+      {showLeaveConfirm && managingCircle && createPortal(
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-150 overflow-y-auto pointer-events-auto">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 text-center space-y-4 my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <div className="w-12 h-12 mx-auto rounded-full bg-rose-50 text-rose-600 flex items-center justify-center">
               <LogOut className="w-6 h-6" />
             </div>
@@ -582,13 +584,14 @@ export const CircleSelector: React.FC<CircleSelectorProps> = ({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 4b. DELETE CIRCLE CONFIRMATION MODAL (Owner/Admin Only) */}
-      {showDeleteConfirm && managingCircle && (
-        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm animate-in fade-in duration-150">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 text-center space-y-4">
+      {showDeleteConfirm && managingCircle && createPortal(
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-150 overflow-y-auto pointer-events-auto">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 text-center space-y-4 my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <div className="w-12 h-12 mx-auto rounded-full bg-rose-100 text-rose-600 flex items-center justify-center shadow-xs">
               <Trash2 className="w-6 h-6" />
             </div>
@@ -638,13 +641,14 @@ export const CircleSelector: React.FC<CircleSelectorProps> = ({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 5. CREATE CIRCLE MODAL */}
-      {showCreateModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm animate-in fade-in duration-150">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 space-y-4">
+      {showCreateModal && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-150 overflow-y-auto pointer-events-auto">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 space-y-4 my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <div className="flex justify-between items-center">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
@@ -714,13 +718,14 @@ export const CircleSelector: React.FC<CircleSelectorProps> = ({
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 6. JOIN CIRCLE MODAL */}
-      {showJoinModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm animate-in fade-in duration-150">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 space-y-4">
+      {showJoinModal && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-150 overflow-y-auto pointer-events-auto">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 space-y-4 my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <div className="flex justify-between items-center">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
@@ -797,13 +802,14 @@ export const CircleSelector: React.FC<CircleSelectorProps> = ({
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 7. QR CODE MODAL */}
-      {showQRModal && managingCircle && (
-        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm animate-in fade-in duration-150">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 text-center space-y-4">
+      {showQRModal && managingCircle && createPortal(
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4 sm:p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-150 overflow-y-auto pointer-events-auto">
+          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl border border-slate-100 text-center space-y-4 my-auto max-h-[calc(100dvh-2.5rem)] overflow-y-auto">
             <div className="flex justify-between items-center">
               <h3 className="text-sm font-bold text-slate-800">Circle QR Code</h3>
               <button
@@ -839,7 +845,8 @@ export const CircleSelector: React.FC<CircleSelectorProps> = ({
               Done
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
