@@ -32,6 +32,91 @@ export interface MapComponentHandle {
   focusMember: (memberOrId: CircleMember | number) => void;
 }
 
+// Perimeter math and boundary intersection helpers for Life360-style off-screen indicators
+function getIntersectionPoint(
+  cx: number,
+  cy: number,
+  px: number,
+  py: number,
+  minX: number,
+  maxX: number,
+  minY: number,
+  maxY: number
+) {
+  const dx = px - cx;
+  const dy = py - cy;
+
+  let x = px;
+  let y = py;
+  let edge: "top" | "bottom" | "left" | "right" = "top";
+
+  if (dx === 0 && dy === 0) {
+    return { x: cx, y: cy, edge };
+  }
+
+  // Check intersection with vertical boundaries (right and left)
+  if (dx !== 0) {
+    if (px > maxX) {
+      const t = (maxX - cx) / dx;
+      const iy = cy + dy * t;
+      if (iy >= minY && iy <= maxY) {
+        return { x: maxX, y: iy, edge: "right" as const };
+      }
+    } else if (px < minX) {
+      const t = (minX - cx) / dx;
+      const iy = cy + dy * t;
+      if (iy >= minY && iy <= maxY) {
+        return { x: minX, y: iy, edge: "left" as const };
+      }
+    }
+  }
+
+  // Check intersection with horizontal boundaries (bottom and top)
+  if (dy !== 0) {
+    if (py > maxY) {
+      const t = (maxY - cy) / dy;
+      const ix = cx + dx * t;
+      if (ix >= minX && ix <= maxX) {
+        return { x: ix, y: maxY, edge: "bottom" as const };
+      }
+    } else if (py < minY) {
+      const t = (minY - cy) / dy;
+      const ix = cx + dx * t;
+      if (ix >= minX && ix <= maxX) {
+        return { x: ix, y: minY, edge: "top" as const };
+      }
+    }
+  }
+
+  // Extreme fallback coordinate clipping
+  if (px > maxX) x = maxX;
+  else if (px < minX) x = minX;
+  if (py > maxY) y = maxY;
+  else if (py < minY) y = minY;
+
+  if (x === maxX) edge = "right";
+  else if (x === minX) edge = "left";
+  else if (y === maxY) edge = "bottom";
+  else edge = "top";
+
+  return { x, y, edge };
+}
+
+function getCoordsFromPerimeter(s: number, minX: number, maxX: number, minY: number, maxY: number) {
+  const w = maxX - minX;
+  const h = maxY - minY;
+
+  if (s < w) {
+    return { x: minX + s, y: minY, edge: "top" as const };
+  } else if (s < w + h) {
+    return { x: maxX, y: minY + (s - w), edge: "right" as const };
+  } else if (s < 2 * w + h) {
+    return { x: maxX - (s - (w + h)), y: maxY, edge: "bottom" as const };
+  } else {
+    return { x: minX, y: maxY - (s - (2 * w + h)), edge: "left" as const };
+  }
+}
+
 export interface MapComponentProps {
   members: CircleMember[];
   currentUser?: UserInfo | null;
@@ -1340,11 +1425,336 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     }
   }, [membersWithLocation, selectedMemberId, selectedIconSize, unselectedIconSize, handleFocusMember]);
 
+  // Viewport-tracking state to trigger re-renders on pan/zoom/resize
+  const [indicatorTrigger, setIndicatorTrigger] = useState(0);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const handleUpdate = () => {
+      setIndicatorTrigger((prev) => prev + 1);
+    };
+
+    map.on("move", handleUpdate);
+    map.on("zoom", handleUpdate);
+    map.on("resize", handleUpdate);
+    window.addEventListener("resize", handleUpdate);
+
+    return () => {
+      map.off("move", handleUpdate);
+      map.off("zoom", handleUpdate);
+      map.off("resize", handleUpdate);
+      window.removeEventListener("resize", handleUpdate);
+    };
+  }, []);
+
+  const renderOffScreenIndicators = () => {
+    const map = mapRef.current;
+    if (!map) return null;
+
+    let container;
+    try {
+      container = map.getContainer();
+    } catch (err) {
+      return null;
+    }
+    if (!container) return null;
+
+    const W = container.clientWidth;
+    const H = container.clientHeight;
+
+    // Define smart adaptive safe area boundaries
+    const topMargin = 96; // Clears the circle selector and header buttons
+    const leftMargin = 24; // Clears left side buttons
+    const rightMargin = 24; // Clears right side buttons
+    const cardPadding = getBottomPadding(isCardHidden);
+    const bottomMargin = Math.max(88, cardPadding + 16); // Dynamic clearance for bottom navigation and selected member card
+
+    const minX = leftMargin;
+    const maxX = W - rightMargin;
+    const minY = topMargin;
+    const maxY = H - bottomMargin;
+
+    if (maxX <= minX || maxY <= minY) return null;
+
+    const cx = W / 2;
+    const cy = H / 2;
+
+    const offScreenMembers: Array<{
+      member: CircleMember;
+      px: number;
+      py: number;
+      x: number;
+      y: number;
+      edge: "top" | "bottom" | "left" | "right";
+      angleDeg: number;
+      baseSize: number;
+      baseColor: string;
+      batteryVal: number | string | null;
+      primaryDevice: any;
+      s: number;
+    }> = [];
+
+    membersWithLocation.forEach((member) => {
+      const primaryDevice = member.devices?.[0];
+      if (!primaryDevice || primaryDevice.longitude === null || primaryDevice.latitude === null) return;
+
+      // MapLibre project coordinates onto screen space
+      const screenPos = map.project([primaryDevice.longitude, primaryDevice.latitude]);
+      const px = screenPos.x;
+      const py = screenPos.y;
+
+      // Treat as off-screen if outside our safe bounds (e.g. hidden by sheet, navigation, or edges)
+      const isOffScreen = px < minX || px > maxX || py < minY || py > maxY;
+
+      if (isOffScreen) {
+        // Find clipping boundary intersection coordinate
+        const { x, y, edge } = getIntersectionPoint(cx, cy, px, py, minX, maxX, minY, maxY);
+
+        // Calculate direction angle from viewport center to target coordinate
+        const angleRad = Math.atan2(py - cy, px - cx);
+        const angleDeg = (angleRad * 180) / Math.PI;
+
+        const baseColor = member.avatar_color || "#4f46e5";
+        const batteryVal = primaryDevice.battery !== undefined && primaryDevice.battery !== null ? primaryDevice.battery : null;
+
+        // Map intersection coordinate onto continuous 1D perimeter
+        const w = maxX - minX;
+        const h = maxY - minY;
+        let s = 0;
+        if (edge === "top") {
+          s = x - minX;
+        } else if (edge === "right") {
+          s = w + (y - minY);
+        } else if (edge === "bottom") {
+          s = w + h + (maxX - x);
+        } else {
+          s = 2 * w + h + (maxY - y);
+        }
+
+        offScreenMembers.push({
+          member,
+          px,
+          py,
+          x,
+          y,
+          edge,
+          angleDeg,
+          baseSize: 40,
+          baseColor,
+          batteryVal,
+          primaryDevice,
+          s,
+        });
+      }
+    });
+
+    if (offScreenMembers.length === 0) return null;
+
+    // Resolve Overlap Collisions along the perimeter using standard push-apart iterations
+    const L = 2 * (maxX - minX) + 2 * (maxY - minY);
+    const minDistance = 54; // Keep icons spaced perfectly
+
+    for (let iter = 0; iter < 8; iter++) {
+      offScreenMembers.sort((a, b) => a.s - b.s);
+      let changed = false;
+      for (let i = 0; i < offScreenMembers.length; i++) {
+        const current = offScreenMembers[i];
+        const next = offScreenMembers[(i + 1) % offScreenMembers.length];
+
+        let diff = next.s - current.s;
+        if (diff < 0) diff += L;
+
+        if (diff < minDistance) {
+          const overlap = minDistance - diff;
+          current.s = (current.s - overlap / 2 + L) % L;
+          next.s = (next.s + overlap / 2) % L;
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+
+    // Convert resolved 1D perimeter coordinates back to 2D screen positions and apply smart scaling
+    const indicators = offScreenMembers.map((item) => {
+      const { x, y, edge } = getCoordsFromPerimeter(item.s, minX, maxX, minY, maxY);
+
+      // Distance to closest corner for corner safe compression
+      let distanceToCorner = 999;
+      if (edge === "top" || edge === "bottom") {
+        distanceToCorner = Math.min(x - minX, maxX - x);
+      } else {
+        distanceToCorner = Math.min(y - minY, maxY - y);
+      }
+
+      // Smooth viewport scale based on client width
+      const viewportFactor = Math.min(1, Math.max(0, (W - 375) / (1200 - 375)));
+      let baseSize = 34 + viewportFactor * 10; // 34px on phone, scales gracefully to 44px on tablet/desktop
+
+      // Corner safe sizing: reduce slightly near corners so indicator fits perfectly without clipping
+      const cornerSpace = 44;
+      if (distanceToCorner < cornerSpace) {
+        const ratio = 0.78 + 0.22 * (distanceToCorner / cornerSpace); // Minimum scale limit of 78%
+        baseSize *= ratio;
+      }
+
+      return {
+        ...item,
+        x,
+        y,
+        edge,
+        baseSize,
+      };
+    });
+
+    return (
+      <div className="absolute inset-0 pointer-events-none z-10 overflow-hidden">
+        {indicators.map(({ member, x, y, angleDeg, baseSize, baseColor, batteryVal, primaryDevice }) => {
+          const batteryScale = baseSize / 40;
+          return (
+            <button
+              key={`offscreen_${member.id}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleFocusMember(member);
+              }}
+              className="absolute pointer-events-auto cursor-pointer focus:outline-none transition-transform active:scale-95 group"
+              style={{
+                left: `${x}px`,
+                top: `${y}px`,
+                transform: "translate(-50%, -50%)",
+              }}
+              title={`Center on ${member.display_name}`}
+            >
+              {/* Pointing pointer wrapper */}
+              <div
+                className="absolute inset-0 flex items-center justify-center pointer-events-none"
+                style={{ transform: `rotate(${angleDeg}deg)` }}
+              >
+                <svg
+                  className="absolute w-3.5 h-3.5 text-white transition-transform group-hover:scale-110"
+                  viewBox="0 0 10 10"
+                  style={{
+                    left: `calc(50% + ${baseSize / 2 - 1.5}px)`,
+                    transform: "translate(-50%, -50%)",
+                  }}
+                >
+                  <polygon
+                    points="0,1.5 8,5 0,8.5"
+                    fill={baseColor}
+                    stroke="white"
+                    strokeWidth="1.2"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </div>
+
+              {/* Squircle member badge with custom SVG device icon */}
+              <div
+                className="relative flex items-center justify-center transition-all duration-150"
+                style={{
+                  width: `${baseSize}px`,
+                  height: `${baseSize}px`,
+                  filter: "drop-shadow(0 4px 6px rgba(0,0,0,0.15))",
+                }}
+              >
+                {/* Layer 1: Colored Border Shell */}
+                <div
+                  className="absolute inset-0 flex items-center justify-center"
+                  style={{
+                    backgroundColor: baseColor,
+                    clipPath: "url(#squircle-clip-map)"
+                  }}
+                >
+                  {/* Layer 2: White Spacer Layer */}
+                  <div
+                    className="absolute inset-[1.5px] bg-white flex items-center justify-center"
+                    style={{ clipPath: "url(#squircle-clip-map)" }}
+                  >
+                    {/* Layer 3: Inner Background & Profile Picture */}
+                    <div
+                      className="absolute inset-[1.5px] text-white font-black flex items-center justify-center overflow-hidden"
+                      style={{
+                        backgroundColor: baseColor,
+                        clipPath: "url(#squircle-clip-map)"
+                      }}
+                    >
+                      {member.profile_picture_url ? (
+                        <img
+                          src={member.profile_picture_url}
+                          alt={member.display_name}
+                          className="w-full h-full object-cover pointer-events-none"
+                          style={{ clipPath: "url(#squircle-clip-map)" }}
+                        />
+                      ) : (
+                        <span className="text-white font-black select-none" style={{ fontSize: `${baseSize * 0.32}px` }}>
+                          {member.display_name.charAt(0).toUpperCase()}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Single source of truth custom DeviceIcon SVG inside badge */}
+                <div
+                  className="absolute -bottom-1 -left-1 bg-white rounded-full shadow-xs border border-slate-100/80 flex items-center justify-center text-indigo-600"
+                  style={{
+                    width: `${baseSize * 0.44}px`,
+                    height: `${baseSize * 0.44}px`,
+                  }}
+                >
+                  <DeviceIcon
+                    deviceIcon={primaryDevice.map_icon}
+                    className="w-[60%] h-[60%] text-indigo-600"
+                  />
+                </div>
+
+                {/* Proportionally scaling battery level indicator */}
+                {batteryVal !== null && (
+                  <div
+                    className="absolute -top-1 -right-1 bg-white text-slate-800 font-extrabold px-1 rounded-full shadow-xs border border-slate-200/90 flex items-center gap-0.5 pointer-events-none"
+                    style={{
+                      fontSize: "8px",
+                      lineHeight: "10px",
+                      height: "12px",
+                      transform: `scale(${batteryScale}) translate(10%, -10%)`,
+                      transformOrigin: "top right",
+                    }}
+                    title={`Battery: ${batteryVal}%`}
+                  >
+                    <span
+                      className={`w-1 h-1 rounded-full ${
+                        Number(batteryVal) <= 20 ? "bg-rose-500 animate-pulse" : "bg-emerald-500"
+                      }`}
+                    />
+                    <span>{batteryVal}%</span>
+                  </div>
+                )}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <div className="relative w-full h-full overflow-hidden select-none">
+      {/* SVG Definitions for true mathematical squircle clips */}
+      <svg className="absolute w-0 h-0 pointer-events-none" width="0" height="0">
+        <defs>
+          <clipPath id="squircle-clip-map" clipPathUnits="objectBoundingBox">
+            <path d="M 0.5,0 C 0.86,0 1,0.14 1,0.5 C 1,0.86 0.86,1 0.5,1 C 0.14,1 0,0.86 0,0.5 C 0,0.14 0.14,0 0.5,0 Z" />
+          </clipPath>
+        </defs>
+      </svg>
       
       {/* FULL-SCREEN MAP CANVAS */}
       <div ref={mapContainerRef} className="w-full h-full absolute inset-0 z-0 bg-[#f8fafc]" />
+      
+      {/* ADAPTIVE OFF-SCREEN MEMBER INDICATORS */}
+      {renderOffScreenIndicators()}
 
       {/* FLOATING MEMBER AVATARS BAR (CENTRED AT VERY TOP) */}
       {membersWithLocation.length > 0 && (
@@ -1361,29 +1771,39 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                   onClick={() => handleFocusMember(member)}
                   title={member.display_name}
                   aria-label={member.display_name}
-                  className={`relative p-0.5 rounded-full transition shrink-0 cursor-pointer border ${
-                    isSelected
-                      ? "bg-white text-slate-900 shadow-md scale-110"
-                      : "bg-white/60 text-slate-700 hover:bg-white/90 hover:scale-105 border-slate-100"
+                  className={`relative w-9 h-9 transition shrink-0 cursor-pointer ${
+                    isSelected ? "scale-110 shadow-md" : "hover:scale-105"
                   }`}
                   style={{
-                    borderColor: isSelected ? memberColor : "rgba(226, 232, 240, 0.8)",
-                    boxShadow: isSelected ? `0 0 0 2.5px ${memberColor}` : "none"
+                    backgroundColor: isSelected ? memberColor : "rgba(226, 232, 240, 0.8)",
+                    clipPath: "url(#squircle-clip-map)",
+                    boxShadow: isSelected ? `0 0 10px ${memberColor}40` : "none",
                   }}
                 >
+                  {/* White Border Spacer */}
                   <div
-                    className="w-8 h-8 rounded-full text-white font-extrabold text-xs flex items-center justify-center shadow-sm overflow-hidden shrink-0"
-                    style={{ backgroundColor: memberColor }}
+                    className="absolute inset-[1.5px] bg-white flex items-center justify-center"
+                    style={{ clipPath: "url(#squircle-clip-map)" }}
                   >
-                    {member.profile_picture_url ? (
-                      <img
-                        src={member.profile_picture_url}
-                        alt={member.display_name}
-                        className="w-full h-full object-cover rounded-full"
-                      />
-                    ) : (
-                      member.display_name.charAt(0).toUpperCase()
-                    )}
+                    {/* Profile Image & Background */}
+                    <div
+                      className="absolute inset-[1.5px] text-white font-extrabold text-xs flex items-center justify-center overflow-hidden shrink-0"
+                      style={{ 
+                        backgroundColor: memberColor,
+                        clipPath: "url(#squircle-clip-map)"
+                      }}
+                    >
+                      {member.profile_picture_url ? (
+                        <img
+                          src={member.profile_picture_url}
+                          alt={member.display_name}
+                          className="w-full h-full object-cover"
+                          style={{ clipPath: "url(#squircle-clip-map)" }}
+                        />
+                      ) : (
+                        member.display_name.charAt(0).toUpperCase()
+                      )}
+                    </div>
                   </div>
                 </button>
               );

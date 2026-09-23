@@ -564,8 +564,14 @@ export default function App() {
           )}
 
           {/* FLOATING NAVIGATION DOCK (MOBILE) */}
-          <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/85 backdrop-blur-2xl px-4 pt-3 pb-[calc(8px+env(safe-area-inset-bottom,16px))] rounded-t-[24px] rounded-b-none border-t border-white/80 shadow-[0_-8px_30px_rgb(0,0,0,0.08)] pointer-events-auto">
-            <div className="flex items-center gap-5 overflow-x-auto scrollbar-none py-1.5 px-0.5 justify-start">
+          <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/85 backdrop-blur-2xl pt-1 pb-[calc(2px+env(safe-area-inset-bottom,4px))] rounded-t-[24px] rounded-b-none border-t border-white/80 shadow-[0_-8px_30px_rgb(0,0,0,0.08)] pointer-events-auto max-h-[144px] overflow-hidden">
+            <div 
+              className="flex items-center gap-4 overflow-x-auto overflow-y-hidden scrollbar-none py-3 px-4 justify-start touch-pan-x"
+              onTouchMove={(e) => {
+                // Completely isolate vertical drag gestures so they cannot bubble and trigger vertical overscroll on the main page/body
+                e.stopPropagation();
+              }}
+            >
               {circleMembers.map((member) => {
                 const isSelected = selectedMemberId === member.id;
                 const memberColor = member.avatar_color || "#4f46e5";
@@ -581,29 +587,39 @@ export default function App() {
                         setSelectedMemberId(member.id);
                       }
                     }}
-                    className="flex flex-col items-center gap-1 shrink-0 cursor-pointer min-w-[56px] focus:outline-none"
+                    className="flex flex-col items-center gap-1 shrink-0 cursor-pointer min-w-[80px] focus:outline-none"
                   >
                     {/* Ring Indicator & Avatar */}
                     <div
-                      className={`relative w-11 h-11 rounded-full p-[1.5px] transition duration-200 ${
+                      className={`relative w-20 h-20 transition duration-200 ${
                         isSelected ? "scale-110" : "hover:scale-105"
                       }`}
                       style={{
-                        background: isSelected ? memberColor : "transparent",
-                        boxShadow: isSelected ? `0 0 10px ${memberColor}30` : "none",
+                        backgroundColor: isSelected ? memberColor : `${memberColor}25`,
+                        clipPath: "url(#squircle-clip-app)",
+                        boxShadow: isSelected ? `0 0 16px ${memberColor}40` : "none",
                       }}
                     >
-                      <div className="w-full h-full rounded-full bg-white p-[1.5px]">
+                      {/* White Border Spacer */}
+                      <div 
+                        className="absolute inset-[2.5px] bg-white flex items-center justify-center"
+                        style={{ clipPath: "url(#squircle-clip-app)" }}
+                      >
+                        {/* Profile Image & Background */}
                         <div
-                          className="w-full h-full rounded-full text-white font-black text-xs flex items-center justify-center overflow-hidden"
-                          style={{ backgroundColor: memberColor }}
+                          className="absolute inset-[2.5px] text-white font-black text-2xl flex items-center justify-center overflow-hidden"
+                          style={{ 
+                            backgroundColor: memberColor,
+                            clipPath: "url(#squircle-clip-app)"
+                          }}
                         >
                           {member.profile_picture_url ? (
                             <img
                               src={member.profile_picture_url}
                               alt={member.display_name}
                               referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover rounded-full"
+                              className="w-full h-full object-cover"
+                              style={{ clipPath: "url(#squircle-clip-app)" }}
                             />
                           ) : (
                             member.display_name.charAt(0).toUpperCase()
@@ -613,7 +629,7 @@ export default function App() {
                     </div>
                     {/* Display Name */}
                     <span
-                      className={`text-[9px] font-extrabold tracking-wide uppercase transition duration-200 truncate max-w-[64px] ${
+                      className={`text-[10px] font-extrabold tracking-wide uppercase transition duration-200 truncate max-w-[100px] ${
                         isSelected ? "text-indigo-600 font-black scale-105" : "text-slate-500"
                       }`}
                     >
@@ -623,6 +639,14 @@ export default function App() {
                 );
               })}
             </div>
+            {/* SVG Definitions for true mathematical squircle clips */}
+            <svg className="absolute w-0 h-0 pointer-events-none" width="0" height="0">
+              <defs>
+                <clipPath id="squircle-clip-app" clipPathUnits="objectBoundingBox">
+                  <path d="M 0.5,0 C 0.86,0 1,0.14 1,0.5 C 1,0.86 0.86,1 0.5,1 C 0.14,1 0,0.86 0,0.5 C 0,0.14 0.14,0 0.5,0 Z" />
+                </clipPath>
+              </defs>
+            </svg>
           </nav>
 
           {/* 4. SECONDARY TABS FLOATING MODAL OVERLAY */}

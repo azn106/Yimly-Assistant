@@ -117,6 +117,48 @@ function escapeHtml(str: string): string {
 }
 
 /**
+ * Renders a mathematical squircle avatar that matches the bottom map selector.
+ */
+function renderSharedSquircleAvatar(
+  size: number,
+  photoUrl: string | null,
+  memberName: string,
+  baseColor: string,
+  borderSize: number = 1.5
+): string {
+  const initial = memberName.charAt(0).toUpperCase() || "U";
+  return `
+    <div
+      class="relative flex items-center justify-center"
+      style="
+        width: ${size}px;
+        height: ${size}px;
+        background-color: #ffffff;
+        clip-path: url(#squircle-clip-app);
+      "
+    >
+      <div
+        class="absolute flex items-center justify-center text-white font-black overflow-hidden"
+        style="
+          left: ${borderSize}px;
+          right: ${borderSize}px;
+          top: ${borderSize}px;
+          bottom: ${borderSize}px;
+          background-color: ${baseColor};
+          clip-path: url(#squircle-clip-app);
+        "
+      >
+        ${
+          photoUrl
+            ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover pointer-events-none" style="clip-path: url(#squircle-clip-app);" />`
+            : `<span class="text-white font-extrabold text-xs drop-shadow-xs">${escapeHtml(initial)}</span>`
+        }
+      </div>
+    </div>
+  `;
+}
+
+/**
  * Renders the HTML string for MapLibre HTML marker element.
  * All shapes are built with precision SVG shells guaranteeing the bottom point is at (width/2, height).
  */
@@ -191,16 +233,10 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
 
           <!-- Avatar / Photo in Head -->
           <div
-            class="relative rounded-full bg-white flex items-center justify-center overflow-hidden border-2 border-white/90 shadow-inner mt-[${Math.round(headCenterY - avatarSize / 2)}px]"
+            class="relative mt-[${Math.round(headCenterY - avatarSize / 2)}px]"
             style="width: ${avatarSize}px; height: ${avatarSize}px; margin-top: ${Math.round(headCenterY - avatarSize / 2)}px;"
           >
-            <div class="w-full h-full rounded-full flex items-center justify-center text-white font-extrabold text-xs overflow-hidden" style="background-color: ${baseColor};">
-              ${
-                photoUrl
-                  ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover rounded-full pointer-events-none" />`
-                  : `<span class="text-white drop-shadow-xs">${escapeHtml(initial)}</span>`
-              }
-            </div>
+            ${renderSharedSquircleAvatar(avatarSize, photoUrl, memberName, baseColor, 2)}
           </div>
         </div>
       `;
@@ -210,35 +246,11 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
     case "circle": {
       // Circle: Clean round avatar with an integrated bottom geographic anchor pip
       const circleDiameter = W - 4;
-      const avatarSize = Math.max(16, circleDiameter - (isSelected ? 8 : 6));
 
       markerContent = `
         <div class="relative w-full h-full flex flex-col items-center justify-start select-none" style="${dropShadowFilter}">
-          <!-- Circular Shell -->
-          <div
-            class="relative rounded-full flex items-center justify-center bg-white transition-all"
-            style="
-              width: ${circleDiameter}px;
-              height: ${circleDiameter}px;
-              border: ${isSelected ? `3.5px solid ${baseColor}` : `2.5px solid white`};
-              box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-            "
-          >
-            <div
-              class="rounded-full flex items-center justify-center text-white font-black text-xs overflow-hidden"
-              style="
-                width: ${avatarSize}px;
-                height: ${avatarSize}px;
-                background-color: ${baseColor};
-              "
-            >
-              ${
-                photoUrl
-                  ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover rounded-full pointer-events-none" />`
-                  : `<span class="text-white drop-shadow-xs">${escapeHtml(initial)}</span>`
-              }
-            </div>
-          </div>
+          <!-- Squircle Shell -->
+          ${renderSharedSquircleAvatar(circleDiameter, photoUrl, memberName, baseColor, isSelected ? 3.5 : 2.5)}
 
           <!-- Bottom Location Anchor Pip -->
           <svg class="w-4 h-3 -mt-0.5 pointer-events-none" viewBox="0 0 16 12" fill="none">
@@ -281,19 +293,14 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
 
           <!-- Avatar Inside Teardrop -->
           <div
-            class="relative rounded-full flex items-center justify-center overflow-hidden border border-slate-200/80 shadow-inner"
+            class="relative overflow-hidden"
             style="
               width: ${avatarSize}px;
               height: ${avatarSize}px;
               margin-top: ${Math.round(headY - avatarSize / 2)}px;
-              background-color: ${baseColor};
             "
           >
-            ${
-              photoUrl
-                ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover rounded-full pointer-events-none" />`
-                : `<span class="text-white font-extrabold text-xs drop-shadow-xs">${escapeHtml(initial)}</span>`
-            }
+            ${renderSharedSquircleAvatar(avatarSize, photoUrl, memberName, baseColor, 0)}
           </div>
         </div>
       `;
@@ -303,7 +310,6 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
     case "beacon": {
       // Beacon: Modern radar location beacon with concentric pulsed rings and sharp anchor needle
       const coreSize = Math.round(W * 0.68);
-      const avatarSize = coreSize - (isSelected ? 6 : 4);
 
       markerContent = `
         <div class="relative w-full h-full flex flex-col items-center justify-start select-none" style="${dropShadowFilter}">
@@ -320,27 +326,13 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
 
             <!-- Central Beacon Core -->
             <div
-              class="relative rounded-full flex items-center justify-center bg-white shadow-md transition-all"
+              class="relative flex items-center justify-center transition-all"
               style="
                 width: ${coreSize}px;
                 height: ${coreSize}px;
-                border: ${isSelected ? `3px solid ${baseColor}` : `2px solid white`};
               "
             >
-              <div
-                class="rounded-full flex items-center justify-center text-white font-black text-xs overflow-hidden"
-                style="
-                  width: ${avatarSize}px;
-                  height: ${avatarSize}px;
-                  background-color: ${baseColor};
-                "
-              >
-                ${
-                  photoUrl
-                    ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover rounded-full pointer-events-none" />`
-                    : `<span class="text-white drop-shadow-xs">${escapeHtml(initial)}</span>`
-                }
-              </div>
+              ${renderSharedSquircleAvatar(coreSize, photoUrl, memberName, baseColor, isSelected ? 3 : 2)}
             </div>
           </div>
 
@@ -385,19 +377,14 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
 
           <!-- Avatar Inside Badge -->
           <div
-            class="relative rounded-full flex items-center justify-center overflow-hidden border border-slate-200/80 shadow-inner"
+            class="relative"
             style="
               width: ${avatarSize}px;
               height: ${avatarSize}px;
               margin-top: ${Math.round((W - avatarSize) / 2)}px;
-              background-color: ${baseColor};
             "
           >
-            ${
-              photoUrl
-                ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover rounded-full pointer-events-none" />`
-                : `<span class="text-white font-extrabold text-xs drop-shadow-xs">${escapeHtml(initial)}</span>`
-            }
+            ${renderSharedSquircleAvatar(avatarSize, photoUrl, memberName, baseColor, 0)}
           </div>
         </div>
       `;
@@ -407,33 +394,18 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
     case "minimal": {
       // Minimal: Ultra-compact, clean avatar medallion atop a sharp precision anchor needle
       const circleDiameter = Math.round(W * 0.72);
-      const avatarSize = circleDiameter - (isSelected ? 6 : 4);
 
       markerContent = `
         <div class="relative w-full h-full flex flex-col items-center justify-start select-none" style="${dropShadowFilter}">
           <!-- Compact Medallion -->
           <div
-            class="relative rounded-full flex items-center justify-center bg-white shadow-xs"
+            class="relative flex items-center justify-center transition-all"
             style="
               width: ${circleDiameter}px;
               height: ${circleDiameter}px;
-              border: ${isSelected ? `2.5px solid ${baseColor}` : `2px solid #ffffff`};
             "
           >
-            <div
-              class="rounded-full flex items-center justify-center text-white font-extrabold text-[11px] overflow-hidden"
-              style="
-                width: ${avatarSize}px;
-                height: ${avatarSize}px;
-                background-color: ${baseColor};
-              "
-            >
-              ${
-                photoUrl
-                  ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover rounded-full pointer-events-none" />`
-                  : `<span class="text-white drop-shadow-xs">${escapeHtml(initial)}</span>`
-              }
-            </div>
+            ${renderSharedSquircleAvatar(circleDiameter, photoUrl, memberName, baseColor, isSelected ? 2.5 : 2)}
           </div>
 
           <!-- Precision Needle Point -->
@@ -476,20 +448,14 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
 
           <!-- Avatar in Arrow Core -->
           <div
-            class="relative rounded-full bg-white flex items-center justify-center overflow-hidden border border-white/80 shadow-inner"
+            class="relative flex items-center justify-center overflow-hidden"
             style="
               width: ${avatarSize}px;
               height: ${avatarSize}px;
               margin-top: ${Math.round((W * 0.65 - avatarSize) / 2 + 2)}px;
             "
           >
-            <div class="w-full h-full rounded-full flex items-center justify-center text-white font-extrabold text-xs overflow-hidden" style="background-color: ${baseColor};">
-              ${
-                photoUrl
-                  ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover rounded-full pointer-events-none" />`
-                  : `<span class="text-white drop-shadow-xs">${escapeHtml(initial)}</span>`
-              }
-            </div>
+            ${renderSharedSquircleAvatar(avatarSize, photoUrl, memberName, baseColor, 1)}
           </div>
         </div>
       `;
@@ -499,34 +465,18 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
     case "photo_pin": {
       // Photo Pin: Premium dominant photo-first frame with bottom anchor stem
       const frameDiameter = W - 2;
-      const avatarSize = frameDiameter - (isSelected ? 6 : 4);
 
       markerContent = `
         <div class="relative w-full h-full flex flex-col items-center justify-start select-none" style="${dropShadowFilter}">
           <!-- Photo Frame -->
           <div
-            class="relative rounded-2xl flex items-center justify-center bg-white transition-all overflow-hidden"
+            class="relative flex items-center justify-center transition-all overflow-hidden"
             style="
               width: ${frameDiameter}px;
               height: ${frameDiameter}px;
-              border: ${isSelected ? `3px solid ${baseColor}` : `2.5px solid white`};
-              box-shadow: 0 3px 10px rgba(0,0,0,0.18);
             "
           >
-            <div
-              class="w-full h-full rounded-xl flex items-center justify-center text-white font-black text-sm overflow-hidden"
-              style="
-                width: ${avatarSize}px;
-                height: ${avatarSize}px;
-                background-color: ${baseColor};
-              "
-            >
-              ${
-                photoUrl
-                  ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover rounded-xl pointer-events-none" />`
-                  : `<span class="text-white drop-shadow-xs">${escapeHtml(initial)}</span>`
-              }
-            </div>
+            ${renderSharedSquircleAvatar(frameDiameter, photoUrl, memberName, baseColor, isSelected ? 3 : 2.5)}
           </div>
 
           <!-- Bottom Location Anchor Tip -->
@@ -571,6 +521,14 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
 
   return `
     <div class="relative w-full h-full cursor-pointer flex items-center justify-center">
+      <!-- Shared mathematical squircle definition ensuring zero dependency delay inside map components -->
+      <svg class="absolute w-0 h-0 pointer-events-none" width="0" height="0">
+        <defs>
+          <clipPath id="squircle-clip-app" clipPathUnits="objectBoundingBox">
+            <path d="M 0.5,0 C 0.86,0 1,0.14 1,0.5 C 1,0.86 0.86,1 0.5,1 C 0.14,1 0,0.86 0,0.5 C 0,0.14 0.14,0 0.5,0 Z" />
+          </clipPath>
+        </defs>
+      </svg>
       ${markerContent}
       ${deviceBadge}
       ${batteryBadge}
