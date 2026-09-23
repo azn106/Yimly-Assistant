@@ -1281,7 +1281,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   const handleUpdateDevice = async (
     entityId: string,
-    updates: { name?: string; location_visibility?: "family" | "me_only"; map_icon?: string; allow_find_my_device?: boolean }
+    updates: { name?: string; location_visibility?: "family" | "me_only"; map_icon?: string; allow_find_my_device?: boolean; is_default?: boolean }
   ) => {
     try {
       const token = getToken();
@@ -1295,10 +1295,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       });
 
       if (res.ok) {
-        const updatedDevice = await res.json();
-        setDevicesList((prev) =>
-          prev.map((d) => (d.entity_id === entityId ? updatedDevice : d))
-        );
+        if (updates.is_default) {
+          await fetchDevices();
+        } else {
+          const updatedDevice = await res.json();
+          setDevicesList((prev) =>
+            prev.map((d) => (d.entity_id === entityId ? updatedDevice : d))
+          );
+        }
         setEditingDeviceId(null);
       }
     } catch (err) {
@@ -2297,8 +2301,23 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                         </div>
                       </div>
 
-                      <div className="text-[10px] text-slate-400 font-mono">
-                        ID: {device.entity_id}
+                      <div className="flex flex-col items-start sm:items-end gap-1.5">
+                        <div className="text-[10px] text-slate-400 font-mono">
+                          ID: {device.entity_id}
+                        </div>
+                        {device.is_default ? (
+                          <span className="px-2.5 py-1 bg-indigo-100 text-indigo-700 text-[10px] font-extrabold rounded-full flex items-center gap-1 shadow-2xs">
+                            <Check className="w-3 h-3 text-indigo-600" /> Default Shared Device
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateDevice(device.entity_id, { is_default: true })}
+                            className="px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-600 hover:text-slate-900 border border-slate-200 text-[10px] font-bold rounded-full transition cursor-pointer shadow-2xs"
+                          >
+                            Set as Default Device
+                          </button>
+                        )}
                       </div>
                     </div>
 

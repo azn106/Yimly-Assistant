@@ -26,6 +26,9 @@ class MemberDeviceLocation(BaseModel):
     battery: Optional[Any] = None
     accuracy: Optional[float] = None
     last_updated: str
+    map_icon: Optional[str] = None
+    location_visibility: Optional[str] = None
+    is_default: Optional[bool] = False
 
 class MemberResponse(BaseModel):
     id: int

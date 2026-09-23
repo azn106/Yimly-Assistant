@@ -791,3 +791,41 @@ export function renderCombinedMarkerHTML(options: RenderCombinedMarkerOptions): 
     </div>
   `;
 }
+
+export interface PrivateDeviceMarkerOptions {
+  ownerColor: string;
+  deviceIcon?: string;
+  deviceName?: string;
+}
+
+export function renderPrivateDeviceMarkerHTML(options: PrivateDeviceMarkerOptions): string {
+  const { ownerColor, deviceIcon, deviceName } = options;
+  const iconSvg = getDeviceIconSVGString(deviceIcon || "📱 Phone", deviceName || "Private Device", "w-4 h-4 text-indigo-600");
+
+  return `
+    <div class="relative w-[34px] h-[34px] flex items-center justify-center select-none" style="filter: none !important; box-shadow: none !important;">
+      <style>
+        @keyframes private-device-breathe {
+          0%, 100% { transform: scale(1); opacity: 0.95; }
+          50% { transform: scale(1.08); opacity: 1; }
+        }
+        .private-breathe-anim {
+          animation: private-device-breathe 2.4s ease-in-out infinite;
+        }
+      </style>
+      <div
+        class="private-breathe-anim relative w-[34px] h-[34px] rounded-full bg-white flex items-center justify-center pointer-events-auto"
+        style="
+          border: 2px solid ${ownerColor || '#4f46e5'};
+          box-shadow: none !important;
+          filter: none !important;
+        "
+        title="${deviceName || 'Private Device'}"
+      >
+        <div class="w-4 h-4 text-indigo-600 flex items-center justify-center">
+          ${iconSvg}
+        </div>
+      </div>
+    </div>
+  `;
+}

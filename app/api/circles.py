@@ -132,13 +132,16 @@ async def list_circle_members(
         device_trackers = res_states.scalars().all()
 
         devices_loc = []
-        for dt in device_trackers:
+        for idx, dt in enumerate(device_trackers):
             # ONLY include devices with valid, non-None real location coordinates
             if dt.latitude is not None and dt.longitude is not None:
                 attrs = dt.attributes if isinstance(dt.attributes, dict) else {}
                 friendly_name = attrs.get("friendly_name") or dt.entity_id
                 battery = attrs.get("battery") or attrs.get("battery_level") or attrs.get("battery_bar")
                 accuracy = attrs.get("gps_accuracy")
+                map_icon = attrs.get("map_icon") or "📱 Phone"
+                loc_vis = attrs.get("location_visibility") or "family"
+                is_def = bool(attrs.get("is_default", False))
                 
                 if dt.last_updated:
                     last_updated_str = dt.last_updated.isoformat() if hasattr(dt.last_updated, "isoformat") else str(dt.last_updated)
@@ -152,8 +155,26 @@ async def list_circle_members(
                     longitude=dt.longitude,
                     battery=battery,
                     accuracy=accuracy,
-                    last_updated=last_updated_str
+                    last_updated=last_updated_str,
+                    map_icon=map_icon,
+                    location_visibility=loc_vis,
+                    is_default=is_def
                 ))
+
+        # Ensure default device comes first at index 0
+        has_explicit_default = any(d.is_default for d in devices_loc)
+        if not has_explicit_default and len(devices_loc) > 0:
+            devices_loc[0].is_default = True
+
+        devices_loc.sort(key=lambda d: 0 if d.is_default else 1)
+
+        # STRICT PRIVACY ENFORCEMENT:
+        # Other circle members receive ONLY the single default shared device location.
+        # The requesting user receives all their own devices (default at [0], private non-defaults at [1..N]).
+        if member.id != user.id:
+            filtered_devices = devices_loc[:1] if len(devices_loc) > 0 else []
+        else:
+            filtered_devices = devices_loc
 
         response.append(MemberResponse(
             id=member.id,
@@ -161,7 +182,7 @@ async def list_circle_members(
             display_name=member.display_name,
             avatar_color=member.avatar_color,
             profile_picture_url=member.profile_picture_url,
-            devices=devices_loc
+            devices=filtered_devices
         ))
 
     return response

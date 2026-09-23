@@ -3,7 +3,7 @@ import { motion, useMotionValue, animate } from "motion/react";
 import * as maplibregl from "maplibre-gl";
 import { CircleMember, LocationHistoryItem, UserInfo, MemberDeviceLocation } from "../types";
 import { getMapStyle } from "../lib/mapStyles";
-import { renderMarkerHTML, getMarkerDimensions, getClusterScale, getBalloonOffsets, calculateDistanceMeters, StackedMemberInfo } from "../lib/markerRenderer";
+import { renderMarkerHTML, renderPrivateDeviceMarkerHTML, getMarkerDimensions, getClusterScale, getBalloonOffsets, calculateDistanceMeters, StackedMemberInfo } from "../lib/markerRenderer";
 import { DeviceIcon } from "./DeviceIcon";
 import { 
   MapPin, 
@@ -30,6 +30,55 @@ import {
 
 export interface MapComponentHandle {
   focusMember: (memberOrId: CircleMember | number) => void;
+}
+
+// Helper to format relative last updated time for selected user card
+function formatRelativeLastUpdated(lastUpdatedStr?: string | null, currentTimeMs?: number): string {
+  if (!lastUpdatedStr) {
+    return "Last updated —";
+  }
+
+  let parseable = lastUpdatedStr;
+  if (parseable.includes(" ") && !parseable.includes("T")) {
+    parseable = parseable.replace(" ", "T");
+  }
+  if (!parseable.endsWith("Z") && !parseable.includes("+") && !parseable.includes("-", 11)) {
+    parseable += "Z";
+  }
+
+  const d = new Date(parseable);
+  let timeMs = d.getTime();
+  if (isNaN(timeMs)) {
+    const d2 = new Date(lastUpdatedStr);
+    timeMs = d2.getTime();
+    if (isNaN(timeMs)) {
+      return "Last updated —";
+    }
+  }
+
+  const nowMs = currentTimeMs ?? Date.now();
+  const diffMs = Math.max(0, nowMs - timeMs);
+  const diffSec = Math.floor(diffMs / 1000);
+
+  if (diffSec < 10) {
+    return "Last updated just now";
+  }
+  if (diffSec < 60) {
+    return `Last updated ${diffSec} sec ago`;
+  }
+
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) {
+    return `Last updated ${diffMin} min ago`;
+  }
+
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) {
+    return `Last updated ${diffHr} hr ago`;
+  }
+
+  const diffDays = Math.floor(diffHr / 24);
+  return `Last updated ${diffDays} day${diffDays === 1 ? "" : "s"} ago`;
 }
 
 // Perimeter math and boundary intersection helpers for Life360-style off-screen indicators
@@ -128,6 +177,7 @@ export interface MapComponentProps {
   unselectedIconSize?: number | null;
   selectedMemberId?: number | null;
   onSelectMemberId?: (id: number | null) => void;
+  onSetDefaultDevice?: (memberId: number | string, entityId: string) => void;
 }
 
 export type RangePresetId = 'today' | 'week' | 'month';
@@ -289,7 +339,8 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
   selectedIconSize,
   unselectedIconSize,
   selectedMemberId: propSelectedMemberId,
-  onSelectMemberId
+  onSelectMemberId,
+  onSetDefaultDevice
 }, ref) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -313,6 +364,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
   const [sheetState, setSheetState] = useState<"expanded" | "compact">("expanded");
   const [isMobile, setIsMobile] = useState<boolean>(false);
   const [mobilePage, setMobilePage] = useState<number>(0);
+  const [desktopCardTab, setDesktopCardTab] = useState<"info" | "history" | "devices">("info");
 
   useEffect(() => {
     const checkMobile = () => {
@@ -346,6 +398,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
   const lastTouchRef = useRef<{ y: number; time: number } | null>(null);
   const axisLockRef = useRef<"x" | "y" | null>(null);
   const startTimeRef = useRef<number>(0);
+  const isScrollableStartRef = useRef<boolean>(false);
 
   const COLLAPSED_SHEET_Y = 280;
   const sheetY = useMotionValue(sheetState === "expanded" ? 0 : COLLAPSED_SHEET_Y);
@@ -384,6 +437,15 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     isDraggingYRef.current = false;
     isGestureReleaseRef.current = false;
     sheetY.stop();
+
+    // Check if touch started inside a scrollable child container (e.g. device list)
+    const target = e.target as HTMLElement | null;
+    const scrollContainer = target ? target.closest<HTMLElement>('.overflow-y-auto, .overflow-auto, [data-scrollable="true"]') : null;
+    if (scrollContainer && scrollContainer.scrollHeight > scrollContainer.clientHeight) {
+      isScrollableStartRef.current = true;
+    } else {
+      isScrollableStartRef.current = false;
+    }
     
     setDragOffsetX(0);
   }, [sheetY]);
@@ -415,13 +477,18 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
       return;
     }
     
-    // Once the axis is locked, completely own the gesture and prevent browser scrolling / secondary touch issues
-    if (e.cancelable) {
-      e.preventDefault();
-    }
-    e.stopPropagation();
-    
     if (axisLockRef.current === "y") {
+      // If touch started inside a scrollable child container, vertical movement belongs exclusively to that list scroll
+      if (isScrollableStartRef.current) {
+        return;
+      }
+
+      // Once the axis is locked for card sheet drag, prevent default browser window scroll
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+      e.stopPropagation();
+
       isDraggingYRef.current = true;
       // Dragging vertical bottom-sheet directly from starting point
       const startPos = sheetStartPosRef.current;
@@ -437,11 +504,18 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
       
       sheetY.set(newY);
     } else if (axisLockRef.current === "x") {
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+      e.stopPropagation();
+
       // Dragging horizontal pages container
       if (mobilePage === 0) {
         setDragOffsetX(Math.min(20, deltaX));
-      } else {
+      } else if (mobilePage === 2) {
         setDragOffsetX(Math.max(-20, deltaX));
+      } else {
+        setDragOffsetX(deltaX);
       }
     }
   }, [mobilePage, sheetY, COLLAPSED_SHEET_Y]);
@@ -461,6 +535,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
       touchCurrentRef.current = null;
       lastTouchRef.current = null;
       axisLockRef.current = null;
+      isScrollableStartRef.current = false;
       isDraggingYRef.current = false;
       return;
     }
@@ -478,6 +553,18 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     const currentAxis = axisLockRef.current;
     
     if (currentAxis === "y") {
+      if (isScrollableStartRef.current) {
+        // Gesture belonged to child list scroll, do NOT collapse or expand the card
+        setDragOffsetX(0);
+        touchStartRef.current = null;
+        touchCurrentRef.current = null;
+        lastTouchRef.current = null;
+        axisLockRef.current = null;
+        isScrollableStartRef.current = false;
+        isDraggingYRef.current = false;
+        return;
+      }
+
       const thresholdY = 35; // responsive snap threshold
       const isFastY = velocityY > 0.15;
       
@@ -519,16 +606,16 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
         setSheetState(targetState);
       }
     } else if (currentAxis === "x") {
-      const thresholdX = 60; // snap threshold
-      const isFastX = velocityX > 0.3;
+      const thresholdX = 50; // snap threshold
+      const isFastX = velocityX > 0.25;
       
-      if (mobilePage === 0) {
-        if (deltaX < -thresholdX || (isFastX && deltaX < 0)) {
-          setMobilePage(1);
+      if (deltaX < -thresholdX || (isFastX && deltaX < 0)) {
+        if (mobilePage < 2) {
+          setMobilePage((prev) => Math.min(2, prev + 1));
         }
-      } else {
-        if (deltaX > thresholdX || (isFastX && deltaX < 0)) {
-          setMobilePage(0);
+      } else if (deltaX > thresholdX || (isFastX && deltaX > 0)) {
+        if (mobilePage > 0) {
+          setMobilePage((prev) => Math.max(0, prev - 1));
         }
       }
     }
@@ -538,6 +625,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     touchCurrentRef.current = null;
     lastTouchRef.current = null;
     axisLockRef.current = null;
+    isScrollableStartRef.current = false;
   }, [sheetState, mobilePage, sheetY]);
 
   // Bind non-passive Touch listeners directly to own gestures, ignoring child interference
@@ -572,6 +660,20 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
   const [historyData, setHistoryData] = useState<LocationHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState<boolean>(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+
+  // Live ticker for relative last_updated timestamp updates while selected user card is visible
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    if (!selectedMemberId) return;
+
+    setNowMs(Date.now());
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [selectedMemberId]);
 
   const currentStyleIdRef = useRef<string | null>(null);
 
@@ -694,6 +796,97 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
       }, 4500);
     }
   }, [pickerMember, selectedDeviceEntityId, pickerDevices]);
+
+  // Per-device Ping Action state & handler for Devices page
+  const [pingingEntityId, setPingingEntityId] = useState<string | null>(null);
+  const [devicePingFeedback, setDevicePingFeedback] = useState<{ entityId: string; message: string; isError?: boolean } | null>(null);
+
+  const handlePingSpecificDevice = useCallback(async (dev: MemberDeviceLocation) => {
+    if (!selectedMember || pingingEntityId) return;
+
+    const isSelf = Boolean(currentUser && selectedMember && currentUser.id === selectedMember.id);
+
+    // Only allow logged-in owner to ping their own linked devices
+    if (!isSelf) {
+      setDevicePingFeedback({
+        entityId: dev.entity_id,
+        message: "Only device owner can ping this device",
+        isError: true
+      });
+      setTimeout(() => setDevicePingFeedback(null), 3500);
+      return;
+    }
+
+    setPingingEntityId(dev.entity_id);
+    setDevicePingFeedback(null);
+
+    // Preview mode check for simulated devices
+    const isSimulated = dev.entity_id.includes("simulated") || dev.entity_id.includes("preview");
+
+    if (isSimulated) {
+      // Preview Mode simulated feedback without sending fake HA requests
+      setTimeout(() => {
+        setPingingEntityId(null);
+        setDevicePingFeedback({
+          entityId: dev.entity_id,
+          message: `[Preview] Simulated ping alert triggered for ${dev.device_name || dev.entity_id}`,
+          isError: false
+        });
+        setTimeout(() => setDevicePingFeedback(null), 3500);
+      }, 500);
+      return;
+    }
+
+    try {
+      const token = localStorage.getItem("access_token") || localStorage.getItem("token") || "";
+      const res = await fetch("/api/events/find_my", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({
+          event_type: "find_my",
+          entity_id: dev.entity_id,
+          user_id: selectedMember.id,
+          device_name: dev.device_name || dev.entity_id
+        })
+      });
+
+      if (res.ok) {
+        setDevicePingFeedback({
+          entityId: dev.entity_id,
+          message: `Ping alert sent to ${dev.device_name || dev.entity_id}`,
+          isError: false
+        });
+      } else if (res.status === 403) {
+        setDevicePingFeedback({
+          entityId: dev.entity_id,
+          message: "Ping action disabled for this device",
+          isError: true
+        });
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setDevicePingFeedback({
+          entityId: dev.entity_id,
+          message: errData.detail || `Ping failed for ${dev.device_name || dev.entity_id}`,
+          isError: true
+        });
+      }
+    } catch (err) {
+      console.warn("Device ping request failed:", err);
+      setDevicePingFeedback({
+        entityId: dev.entity_id,
+        message: "Network error sending ping to Home Assistant",
+        isError: true
+      });
+    } finally {
+      setPingingEntityId(null);
+      setTimeout(() => {
+        setDevicePingFeedback(null);
+      }, 3500);
+    }
+  }, [selectedMember, currentUser, pingingEntityId]);
 
   // ----------------------------------------------------
   // REVERSE GEOCODING LOGIC
@@ -1112,6 +1305,33 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     });
   }, [getBottomPadding]);
 
+  // Directly fly map camera to a specific device's exact GPS coordinates
+  const flyToDeviceLocation = useCallback((
+    latitude: number | null | undefined,
+    longitude: number | null | undefined,
+    duration = 800
+  ) => {
+    if (latitude === null || latitude === undefined || longitude === null || longitude === undefined) return;
+    const map = mapRef.current;
+    if (!map) return;
+
+    const bottomPad = getBottomPadding(isCardHidden);
+    const topPad = 76;
+
+    currentTargetCoordRef.current = [longitude, latitude];
+
+    const currentZoom = map.getZoom();
+    const targetZoom = currentZoom < 14 ? 15 : currentZoom;
+
+    map.flyTo({
+      center: [longitude, latitude],
+      zoom: targetZoom,
+      padding: { top: topPad, bottom: bottomPad, left: 0, right: 0 },
+      duration,
+      essential: true
+    });
+  }, [getBottomPadding, isCardHidden]);
+
   // Focus member, center map in usable area above card, and show member information card
   const handleFocusMember = useCallback((memberOrId: CircleMember | number) => {
     const memberId = typeof memberOrId === "number" ? memberOrId : memberOrId.id;
@@ -1173,6 +1393,33 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
   }, [selectedMember, flyToMemberLocation]);
 
   // Hide Card action: hides card and expands usable map area to full viewport
+  const handleSetDefaultDevice = useCallback(async (entityId: string) => {
+    if (!selectedMember) return;
+    try {
+      if (onSetDefaultDevice) {
+        onSetDefaultDevice(selectedMember.id, entityId);
+      }
+
+      const token = localStorage.getItem("access_token");
+      if (token) {
+        await fetch(`/api/devices/${encodeURIComponent(entityId)}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({ is_default: true })
+        });
+      }
+
+      if (onRefresh) {
+        onRefresh();
+      }
+    } catch (err) {
+      console.error("Failed to update default device:", err);
+    }
+  }, [selectedMember, onSetDefaultDevice, onRefresh]);
+
   const handleHideCard = useCallback(() => {
     setIsCardHidden(true);
     if (selectedMember) {
@@ -1533,6 +1780,68 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
         }
       });
     });
+
+    // Render Private Device Markers for logged-in user's non-default devices ONLY
+    const loggedInOwner = membersWithLocation.find((m) => currentUser && m.id === currentUser.id);
+    if (loggedInOwner && loggedInOwner.devices && loggedInOwner.devices.length > 1) {
+      const privateDevices = loggedInOwner.devices.slice(1);
+      const ownerColor = loggedInOwner.avatar_color || "#4f46e5";
+
+      privateDevices.forEach((dev) => {
+        if (dev.longitude === null || dev.latitude === null || dev.longitude === undefined || dev.latitude === undefined) return;
+
+        const pMarkerKey = `private_device_${dev.entity_id}`;
+        currentMarkerKeys.add(pMarkerKey);
+
+        const markerLng = dev.longitude;
+        const markerLat = dev.latitude;
+
+        let pMarker = markersRef.current[pMarkerKey];
+
+        if (!pMarker) {
+          const el = document.createElement("div");
+          el.className = "custom-private-device-marker cursor-pointer select-none";
+          el.style.zIndex = "55";
+
+          pMarker = new maplibregl.Marker({
+            element: el,
+            anchor: "center",
+            offset: [0, 0]
+          })
+            .setLngLat([markerLng, markerLat])
+            .addTo(map);
+
+          markersRef.current[pMarkerKey] = pMarker;
+        } else {
+          pMarker.setLngLat([markerLng, markerLat]);
+          pMarker.setOffset([0, 0]);
+        }
+
+        const el = pMarker.getElement();
+        el.style.zIndex = "55";
+        el.style.width = "34px";
+        el.style.height = "34px";
+
+        el.onclick = (e) => {
+          e.stopPropagation();
+          map.flyTo({ center: [markerLng, markerLat], zoom: 16, duration: 500 });
+          handleFocusMember(loggedInOwner);
+        };
+
+        const mapIcon = dev.map_icon ? dev.map_icon.split(" ")[0] : "📱";
+        const devName = dev.device_name || "Private Device";
+        const pRenderKey = `${pMarkerKey}_${ownerColor}_${mapIcon}_${devName}_34`;
+
+        if (el.dataset.renderKey !== pRenderKey) {
+          el.dataset.renderKey = pRenderKey;
+          el.innerHTML = renderPrivateDeviceMarkerHTML({
+            ownerColor,
+            deviceIcon: mapIcon,
+            deviceName: devName
+          });
+        }
+      });
+    }
 
     // Cleanup markers for removed members
     Object.keys(markersRef.current).forEach((key) => {
@@ -2319,135 +2628,291 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                     )}
                   </div>
 
-                  {/* Location Info Block (Address + Coordinates) */}
-                  {hasLinkedDevice && (
-                    <div className="bg-slate-50/90 border border-slate-100 rounded-2xl p-2.5 text-center space-y-1">
-                      <div className="flex items-center justify-center gap-1.5 text-slate-400 text-[11px] font-extrabold uppercase tracking-wider">
-                        <MapPin className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                        <span>Last known location</span>
-                      </div>
+                  {/* 3 Pages Navigation Bar (Desktop Card) */}
+                  <div className="flex items-center justify-center gap-1 bg-slate-100/90 p-1 rounded-2xl shadow-2xs">
+                    <button
+                      type="button"
+                      onClick={() => { setDesktopCardTab("info"); setIsHistoryOpen(false); }}
+                      className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-black transition cursor-pointer ${
+                        desktopCardTab === "info" && !isHistoryOpen
+                          ? "bg-white text-indigo-600 shadow-2xs"
+                          : "text-slate-500 hover:text-slate-800"
+                      }`}
+                    >
+                      Info
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setDesktopCardTab("history"); setIsHistoryOpen(true); }}
+                      className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-black transition cursor-pointer ${
+                        isHistoryOpen || desktopCardTab === "history"
+                          ? "bg-white text-indigo-600 shadow-2xs"
+                          : "text-slate-500 hover:text-slate-800"
+                      }`}
+                    >
+                      History
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setDesktopCardTab("devices"); setIsHistoryOpen(false); }}
+                      className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-black transition cursor-pointer ${
+                        desktopCardTab === "devices" && !isHistoryOpen
+                          ? "bg-white text-indigo-600 shadow-2xs"
+                          : "text-slate-500 hover:text-slate-800"
+                      }`}
+                    >
+                      Devices ({selectedMember.devices?.length || 0})
+                    </button>
+                  </div>
 
-                      {hasValidLocation && primaryDevice ? (
-                        <>
-                          {/* Primary: Reverse Geocoded Street Address */}
-                          <div className="text-xs sm:text-sm font-extrabold text-slate-800 leading-snug px-1">
-                            {addressLoading && !currentAddress ? (
-                              <span className="text-slate-400 font-medium italic">Resolving address...</span>
-                            ) : currentAddress ? (
-                              currentAddress
-                            ) : (
-                              `${primaryDevice.latitude.toFixed(6)}, ${primaryDevice.longitude.toFixed(6)}`
-                            )}
-                          </div>
+                  {desktopCardTab === "devices" && !isHistoryOpen ? (
+                    /* PAGE 3: DEVICES VIEW (DESKTOP) */
+                    <div className="space-y-3 animate-in fade-in duration-200">
+                      {selectedMember.devices && selectedMember.devices.length > 0 ? (
+                        <div data-scrollable="true" className="space-y-2 max-h-[220px] overflow-y-auto overscroll-y-contain pr-0.5 scrollbar-thin">
+                          {selectedMember.devices.map((dev, devIdx) => {
+                            const isDefault = dev.is_default || devIdx === 0;
+                            const isOwner = currentUser && String(selectedMember.id) === String(currentUser.id);
+                            const hasLoc = dev.latitude !== null && dev.longitude !== null;
 
-                          {/* Secondary: Exact GPS Coordinates */}
-                          <div className="text-[11px] font-mono font-semibold text-slate-500 tracking-wide">
-                            {primaryDevice.latitude.toFixed(6)}, {primaryDevice.longitude.toFixed(6)}
-                          </div>
-                        </>
+                            return (
+                              <div
+                                key={dev.entity_id}
+                                onClick={() => flyToDeviceLocation(dev.latitude, dev.longitude)}
+                                className={`p-3 rounded-2xl border text-left transition ${
+                                  hasLoc ? "cursor-pointer hover:border-indigo-300 hover:shadow-2xs active:scale-[0.99]" : ""
+                                } ${
+                                  isDefault
+                                    ? "bg-indigo-50/80 border-indigo-200/90 shadow-2xs"
+                                    : "bg-slate-50/80 border-slate-200/60"
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <div className="w-8 h-8 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center text-indigo-600 shrink-0 shadow-2xs">
+                                      <DeviceIcon deviceIcon={dev.map_icon} deviceName={dev.device_name} className="w-4 h-4 text-indigo-600" />
+                                    </div>
+                                    <div className="min-w-0">
+                                      <h5 className="text-xs font-black text-slate-800 truncate">
+                                        {dev.device_name || dev.entity_id}
+                                      </h5>
+                                      <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-0.5">
+                                        {dev.battery !== undefined && dev.battery !== null && (
+                                          <span className="flex items-center gap-0.5 font-bold text-slate-600">
+                                            <Battery className="w-3 h-3 text-emerald-500" />
+                                            {dev.battery}%
+                                          </span>
+                                        )}
+                                        <span>•</span>
+                                        <span>{formatRelativeLastUpdated(dev.last_updated, nowMs)}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    {isOwner && (
+                                      <button
+                                        type="button"
+                                        disabled={pingingEntityId === dev.entity_id}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handlePingSpecificDevice(dev);
+                                        }}
+                                        className="px-2 py-1 bg-amber-500/10 hover:bg-amber-500/20 active:scale-95 text-amber-800 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition cursor-pointer flex items-center gap-1 text-[10px] font-extrabold border border-amber-500/25 shrink-0"
+                                        title="Ping device (plays sound/notification via Home Assistant)"
+                                        aria-label="Ping Device"
+                                      >
+                                        <Volume2 className={`w-3 h-3 text-amber-600 ${pingingEntityId === dev.entity_id ? "animate-bounce" : ""}`} />
+                                        <span>{pingingEntityId === dev.entity_id ? "Pinging..." : "Ping"}</span>
+                                      </button>
+                                    )}
+
+                                    {isDefault ? (
+                                      <span className="px-2.5 py-1 bg-indigo-100 text-indigo-700 text-[10px] font-black rounded-full flex items-center gap-1 shrink-0">
+                                        <Check className="w-3 h-3 text-indigo-600" /> Default
+                                      </span>
+                                    ) : isOwner ? (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSetDefaultDevice(dev.entity_id);
+                                        }}
+                                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-[10px] font-bold rounded-full transition cursor-pointer shrink-0 shadow-2xs"
+                                      >
+                                        Set as Default
+                                      </button>
+                                    ) : (
+                                      <span className="px-2.5 py-1 bg-slate-200/80 text-slate-600 text-[10px] font-extrabold rounded-full shrink-0">
+                                        Private Device
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {dev.latitude !== null && dev.longitude !== null && (
+                                  <div className="mt-2 pt-2 border-t border-slate-200/50 flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                                    <span className="flex items-center gap-1">
+                                      <MapPin className="w-3 h-3 text-indigo-500" /> Exact Location
+                                    </span>
+                                    <span>{dev.latitude.toFixed(5)}, {dev.longitude.toFixed(5)}</span>
+                                  </div>
+                                )}
+
+                                {devicePingFeedback?.entityId === dev.entity_id && (
+                                  <div className={`mt-2 p-1.5 rounded-xl text-[10px] font-bold text-center animate-in fade-in duration-200 ${
+                                    devicePingFeedback.isError
+                                      ? "bg-rose-50 text-rose-700 border border-rose-200/60"
+                                      : "bg-emerald-50 text-emerald-700 border border-emerald-200/60"
+                                  }`}>
+                                    {devicePingFeedback.message}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
                       ) : (
-                        <div className="text-xs text-slate-500 font-medium">Location unavailable</div>
+                        <div className="py-6 px-4 rounded-2xl bg-slate-50/80 border border-slate-200/60 text-center">
+                          <p className="text-xs font-bold text-slate-600">
+                            No HA Companion App device linked to this account
+                          </p>
+                        </div>
                       )}
                     </div>
-                  )}
-
-                  {/* Ping Device Status Toast / Banner */}
-                  {pingStatusMessage && (
-                    <div className="flex items-center justify-center gap-2 py-2 px-3 bg-amber-500/15 border border-amber-500/30 text-amber-900 rounded-2xl text-xs font-extrabold animate-in fade-in duration-200 text-center shadow-2xs">
-                      <Volume2 className="w-4 h-4 text-amber-600 animate-pulse shrink-0" />
-                      <span>{pingStatusMessage}</span>
-                    </div>
-                  )}
-
-                  {hasLinkedDevice ? (
-                    /* Bottom Action Grid */
-                    <div className="grid grid-cols-5 gap-1.5 pt-1">
-                      {/* Compact History Control */}
-                      <button
-                        onClick={handleToggleHistory}
-                        className="py-2.5 px-1 bg-indigo-50 hover:bg-indigo-100 active:scale-95 text-indigo-700 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-indigo-100/40"
-                        title="Location History Range"
-                      >
-                        <History className={`w-4 h-4 ${historyLoading ? "animate-spin" : ""}`} />
-                        <span className="truncate">History</span>
-                      </button>
-
-                      {/* Ping Device Control */}
-                      <button
-                        onClick={handlePingDevice}
-                        disabled={!hasLinkedDevice || pingLoading}
-                        className="py-2.5 px-1 bg-amber-50 hover:bg-amber-100 active:scale-95 text-amber-800 disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-amber-200/50"
-                        title="Ping device (plays sound via Home Assistant find_my event)"
-                        aria-label="Ping Device"
-                      >
-                        <Volume2 className={`w-4 h-4 text-amber-600 ${pingLoading ? "animate-bounce" : ""}`} />
-                        <span className="truncate">{pingLoading ? "Pinging..." : "Ping"}</span>
-                      </button>
-
-                      {/* Get Directions Control */}
-                      <button
-                        onClick={handleGetDirections}
-                        disabled={!hasValidLocation}
-                        className="py-2.5 px-1 bg-emerald-50 hover:bg-emerald-100 active:scale-95 text-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-emerald-100/40"
-                        title={hasValidLocation ? "Get directions in Google Maps" : "Location unavailable for directions"}
-                        aria-label="Get Directions"
-                      >
-                        <Route className="w-4 h-4 text-emerald-600" />
-                        <span className="truncate">Directions</span>
-                      </button>
-
-                      <button
-                        onClick={() => handleFocusMember(selectedMember)}
-                        className="py-2.5 px-1 bg-slate-50 hover:bg-slate-100 active:scale-95 text-slate-700 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-slate-100/40"
-                        title="Center on member"
-                        aria-label="Center on member"
-                      >
-                        <Navigation className="w-4 h-4" />
-                        <span className="truncate">Recenter</span>
-                      </button>
-
-                      <button
-                        onClick={() => {
-                          if (isMobile) {
-                            setSheetState("compact");
-                          } else {
-                            handleHideCard();
-                          }
-                        }}
-                        className="py-2.5 px-1 bg-slate-50 hover:bg-slate-100 active:scale-95 text-slate-700 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-slate-100/40"
-                        title={isMobile ? "Collapse sheet" : "Hide card"}
-                        aria-label={isMobile ? "Collapse sheet" : "Hide card"}
-                      >
-                        <ChevronDown className="w-4 h-4" />
-                        <span className="truncate">{isMobile ? "Collapse" : "Hide"}</span>
-                      </button>
-                    </div>
                   ) : (
-                    <div className="space-y-3 pt-1">
-                      <div className="py-3.5 px-4 rounded-2xl bg-white/40 border border-white/60 text-center">
-                        <p className="text-xs sm:text-sm font-bold text-slate-700 leading-relaxed">
-                          No HA Companion App device linked to this account
-                        </p>
-                      </div>
+                    <>
+                      {/* Location Info Block (Address + Coordinates) */}
+                      {hasLinkedDevice && (
+                        <div className="bg-slate-50/90 border border-slate-100 rounded-2xl p-2.5 text-center space-y-1">
+                          <div className="flex items-center justify-center gap-1.5 text-slate-400 text-[11px] font-extrabold uppercase tracking-wider">
+                            <MapPin className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                            <span>{formatRelativeLastUpdated(hasValidLocation ? primaryDevice?.last_updated : null, nowMs)}</span>
+                          </div>
 
-                      <div className="flex justify-end pt-0.5">
-                        <button
-                          onClick={() => {
-                            if (isMobile) {
-                              setSheetState("compact");
-                            } else {
-                              handleHideCard();
-                            }
-                          }}
-                          className="py-2 px-3 bg-slate-50 hover:bg-slate-100 active:scale-95 text-slate-700 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs border border-slate-100/40"
-                          title={isMobile ? "Collapse sheet" : "Hide card"}
-                          aria-label={isMobile ? "Collapse sheet" : "Hide card"}
-                        >
-                          <ChevronDown className="w-4 h-4" />
-                          <span>{isMobile ? "Collapse" : "Hide"}</span>
-                        </button>
-                      </div>
-                    </div>
+                          {hasValidLocation && primaryDevice ? (
+                            <>
+                              {/* Primary: Reverse Geocoded Street Address */}
+                              <div className="text-xs sm:text-sm font-extrabold text-slate-800 leading-snug px-1">
+                                {addressLoading && !currentAddress ? (
+                                  <span className="text-slate-400 font-medium italic">Resolving address...</span>
+                                ) : currentAddress ? (
+                                  currentAddress
+                                ) : (
+                                  `${primaryDevice.latitude.toFixed(6)}, ${primaryDevice.longitude.toFixed(6)}`
+                                )}
+                              </div>
+
+                              {/* Secondary: Exact GPS Coordinates */}
+                              <div className="text-[11px] font-mono font-semibold text-slate-500 tracking-wide">
+                                {primaryDevice.latitude.toFixed(6)}, {primaryDevice.longitude.toFixed(6)}
+                              </div>
+                            </>
+                          ) : (
+                            <div className="text-xs text-slate-500 font-medium">Location unavailable</div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Ping Device Status Toast / Banner */}
+                      {pingStatusMessage && (
+                        <div className="flex items-center justify-center gap-2 py-2 px-3 bg-amber-500/15 border border-amber-500/30 text-amber-900 rounded-2xl text-xs font-extrabold animate-in fade-in duration-200 text-center shadow-2xs">
+                          <Volume2 className="w-4 h-4 text-amber-600 animate-pulse shrink-0" />
+                          <span>{pingStatusMessage}</span>
+                        </div>
+                      )}
+
+                      {hasLinkedDevice ? (
+                        /* Bottom Action Grid */
+                        <div className="grid grid-cols-5 gap-1.5 pt-1">
+                          {/* Compact History Control */}
+                          <button
+                            onClick={handleToggleHistory}
+                            className="py-2.5 px-1 bg-indigo-50 hover:bg-indigo-100 active:scale-95 text-indigo-700 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-indigo-100/40"
+                            title="Location History Range"
+                          >
+                            <History className={`w-4 h-4 ${historyLoading ? "animate-spin" : ""}`} />
+                            <span className="truncate">History</span>
+                          </button>
+
+                          {/* Ping Device Control */}
+                          <button
+                            onClick={handlePingDevice}
+                            disabled={!hasLinkedDevice || pingLoading}
+                            className="py-2.5 px-1 bg-amber-50 hover:bg-amber-100 active:scale-95 text-amber-800 disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-amber-200/50"
+                            title="Ping device (plays sound via Home Assistant find_my event)"
+                            aria-label="Ping Device"
+                          >
+                            <Volume2 className={`w-4 h-4 text-amber-600 ${pingLoading ? "animate-bounce" : ""}`} />
+                            <span className="truncate">{pingLoading ? "Pinging..." : "Ping"}</span>
+                          </button>
+
+                          {/* Get Directions Control */}
+                          <button
+                            onClick={handleGetDirections}
+                            disabled={!hasValidLocation}
+                            className="py-2.5 px-1 bg-emerald-50 hover:bg-emerald-100 active:scale-95 text-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-emerald-100/40"
+                            title={hasValidLocation ? "Get directions in Google Maps" : "Location unavailable for directions"}
+                            aria-label="Get Directions"
+                          >
+                            <Route className="w-4 h-4 text-emerald-600" />
+                            <span className="truncate">Directions</span>
+                          </button>
+
+                          <button
+                            onClick={() => handleFocusMember(selectedMember)}
+                            className="py-2.5 px-1 bg-slate-50 hover:bg-slate-100 active:scale-95 text-slate-700 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-slate-100/40"
+                            title="Center on member"
+                            aria-label="Center on member"
+                          >
+                            <Navigation className="w-4 h-4" />
+                            <span className="truncate">Recenter</span>
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              if (isMobile) {
+                                setSheetState("compact");
+                              } else {
+                                handleHideCard();
+                              }
+                            }}
+                            className="py-2.5 px-1 bg-slate-50 hover:bg-slate-100 active:scale-95 text-slate-700 rounded-2xl text-[11px] font-bold transition flex flex-col items-center justify-center gap-1.5 cursor-pointer shadow-xs border border-slate-100/40"
+                            title={isMobile ? "Collapse sheet" : "Hide card"}
+                            aria-label={isMobile ? "Collapse sheet" : "Hide card"}
+                          >
+                            <ChevronDown className="w-4 h-4" />
+                            <span className="truncate">{isMobile ? "Collapse" : "Hide"}</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="space-y-3 pt-1">
+                          <div className="py-3.5 px-4 rounded-2xl bg-white/40 border border-white/60 text-center">
+                            <p className="text-xs sm:text-sm font-bold text-slate-700 leading-relaxed">
+                              No HA Companion App device linked to this account
+                            </p>
+                          </div>
+
+                          <div className="flex justify-end pt-0.5">
+                            <button
+                              onClick={() => {
+                                if (isMobile) {
+                                  setSheetState("compact");
+                                } else {
+                                  handleHideCard();
+                                }
+                              }}
+                              className="py-2 px-3 bg-slate-50 hover:bg-slate-100 active:scale-95 text-slate-700 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs border border-slate-100/40"
+                              title={isMobile ? "Collapse sheet" : "Hide card"}
+                              aria-label={isMobile ? "Collapse sheet" : "Hide card"}
+                            >
+                              <ChevronDown className="w-4 h-4" />
+                              <span>{isMobile ? "Collapse" : "Hide"}</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               )
@@ -2479,13 +2944,13 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
             <div className="w-full h-[330px] overflow-hidden relative">
               <motion.div
                 animate={{
-                  x: `calc(${-mobilePage * 50}% + ${dragOffsetX}px)`
+                  x: `calc(${-mobilePage * (100 / 3)}% + ${dragOffsetX}px)`
                 }}
                 transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                className="flex w-[200%] h-full"
+                className="flex w-[300%] h-full"
               >
                 {/* PAGE 1: Current Info */}
-                <div className="w-1/2 h-full px-5 pb-4 flex flex-col justify-between overflow-y-auto scrollbar-none select-none">
+                <div className="w-1/3 h-full px-5 pb-4 flex flex-col justify-between overflow-y-auto scrollbar-none select-none">
                   <div className="space-y-3">
                     {/* Member Name */}
                     <div
@@ -2621,23 +3086,24 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                   )}
                 </div>
 
-                {hasLinkedDevice ? (
-                  /* Page Indicator 1 */
-                  <div className="flex items-center justify-center gap-1.5 mt-2 pb-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" />
-                    <button
-                      onClick={() => setMobilePage(1)}
-                      className="w-1.5 h-1.5 rounded-full bg-slate-300 hover:bg-slate-400 transition"
-                      aria-label="Go to Custom Range page"
-                    />
-                  </div>
-                ) : (
-                  <div className="pb-2" />
-                )}
+                {/* Page Indicator 1 */}
+                <div className="flex items-center justify-center gap-1.5 mt-2 pb-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" />
+                  <button
+                    onClick={() => setMobilePage(1)}
+                    className="w-1.5 h-1.5 rounded-full bg-slate-300 hover:bg-slate-400 transition"
+                    aria-label="Go to Custom Range page"
+                  />
+                  <button
+                    onClick={() => setMobilePage(2)}
+                    className="w-1.5 h-1.5 rounded-full bg-slate-300 hover:bg-slate-400 transition"
+                    aria-label="Go to Devices page"
+                  />
+                </div>
               </div>
 
               {/* PAGE 2: Custom Range */}
-              <div className="w-1/2 h-full px-5 pb-4 flex flex-col justify-between overflow-y-auto scrollbar-none select-none">
+              <div className="w-1/3 h-full px-5 pb-4 flex flex-col justify-between overflow-y-auto scrollbar-none select-none">
                 <div className="space-y-4">
                   <h3 className="text-base font-black text-slate-800 text-center mt-1">
                     Custom Range
@@ -2703,6 +3169,147 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                     onClick={() => setMobilePage(0)}
                     className="w-1.5 h-1.5 rounded-full bg-slate-300 hover:bg-slate-400 transition"
                     aria-label="Go to Current Info page"
+                  />
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" />
+                  <button
+                    onClick={() => setMobilePage(2)}
+                    className="w-1.5 h-1.5 rounded-full bg-slate-300 hover:bg-slate-400 transition"
+                    aria-label="Go to Devices page"
+                  />
+                </div>
+              </div>
+
+              {/* PAGE 3: Linked Devices */}
+              <div className="w-1/3 h-full px-5 pb-4 flex flex-col justify-between overflow-hidden select-none">
+                <div className="space-y-3">
+                  <h3 className="text-base font-black text-slate-800 text-center mt-1">
+                    Linked Devices
+                  </h3>
+
+                  {selectedMember.devices && selectedMember.devices.length > 0 ? (
+                    <div data-scrollable="true" className="space-y-2 max-h-[220px] overflow-y-auto overscroll-y-contain pr-0.5 scrollbar-thin">
+                      {selectedMember.devices.map((dev, devIdx) => {
+                        const isDefault = dev.is_default || devIdx === 0;
+                        const isOwner = currentUser && String(selectedMember.id) === String(currentUser.id);
+                        const hasLoc = dev.latitude !== null && dev.longitude !== null;
+
+                        return (
+                          <div
+                            key={dev.entity_id}
+                            onClick={() => flyToDeviceLocation(dev.latitude, dev.longitude)}
+                            className={`p-3 rounded-2xl border text-left transition ${
+                              hasLoc ? "cursor-pointer hover:border-indigo-300 hover:shadow-2xs active:scale-[0.99]" : ""
+                            } ${
+                              isDefault
+                                ? "bg-indigo-50/80 border-indigo-200/90 shadow-2xs"
+                                : "bg-slate-50/80 border-slate-200/60"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-8 h-8 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center text-indigo-600 shrink-0 shadow-2xs">
+                                  <DeviceIcon deviceIcon={dev.map_icon} deviceName={dev.device_name} className="w-4 h-4 text-indigo-600" />
+                                </div>
+                                <div className="min-w-0">
+                                  <h4 className="text-xs font-black text-slate-800 truncate">
+                                    {dev.device_name || dev.entity_id}
+                                  </h4>
+                                  <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-0.5">
+                                    {dev.battery !== undefined && dev.battery !== null && (
+                                      <span className="flex items-center gap-0.5 font-bold text-slate-600">
+                                        <Battery className="w-3 h-3 text-emerald-500" />
+                                        {dev.battery}%
+                                      </span>
+                                    )}
+                                    <span>•</span>
+                                    <span>{formatRelativeLastUpdated(dev.last_updated, nowMs)}</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {isOwner && (
+                                  <button
+                                    type="button"
+                                    disabled={pingingEntityId === dev.entity_id}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handlePingSpecificDevice(dev);
+                                    }}
+                                    className="px-2 py-1 bg-amber-500/10 hover:bg-amber-500/20 active:scale-95 text-amber-800 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition cursor-pointer flex items-center gap-1 text-[10px] font-extrabold border border-amber-500/25 shrink-0"
+                                    title="Ping device (plays sound/notification via Home Assistant)"
+                                    aria-label="Ping Device"
+                                  >
+                                    <Volume2 className={`w-3 h-3 text-amber-600 ${pingingEntityId === dev.entity_id ? "animate-bounce" : ""}`} />
+                                    <span>{pingingEntityId === dev.entity_id ? "Pinging..." : "Ping"}</span>
+                                  </button>
+                                )}
+
+                                {isDefault ? (
+                                  <span className="px-2.5 py-1 bg-indigo-100 text-indigo-700 text-[10px] font-black rounded-full flex items-center gap-1 shrink-0">
+                                    <Check className="w-3 h-3 text-indigo-600" /> Default
+                                  </span>
+                                ) : isOwner ? (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleSetDefaultDevice(dev.entity_id);
+                                    }}
+                                    className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-[10px] font-bold rounded-full transition cursor-pointer shrink-0 shadow-2xs"
+                                  >
+                                    Set as Default
+                                  </button>
+                                ) : (
+                                  <span className="px-2.5 py-1 bg-slate-200/80 text-slate-600 text-[10px] font-extrabold rounded-full shrink-0">
+                                    Private
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {dev.latitude !== null && dev.longitude !== null && (
+                              <div className="mt-2 pt-2 border-t border-slate-200/50 flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                                <span className="flex items-center gap-1">
+                                  <MapPin className="w-3 h-3 text-indigo-500" /> Exact Location
+                                </span>
+                                <span>{dev.latitude.toFixed(5)}, {dev.longitude.toFixed(5)}</span>
+                              </div>
+                            )}
+
+                            {devicePingFeedback?.entityId === dev.entity_id && (
+                              <div className={`mt-2 p-1.5 rounded-xl text-[10px] font-bold text-center animate-in fade-in duration-200 ${
+                                devicePingFeedback.isError
+                                  ? "bg-rose-50 text-rose-700 border border-rose-200/60"
+                                  : "bg-emerald-50 text-emerald-700 border border-emerald-200/60"
+                              }`}>
+                                {devicePingFeedback.message}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="py-6 px-4 rounded-2xl bg-slate-50/80 border border-slate-200/60 text-center">
+                      <p className="text-xs font-bold text-slate-600">
+                        No HA Companion App devices connected
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Page Indicator 3 */}
+                <div className="flex items-center justify-center gap-1.5 mt-2 pb-2">
+                  <button
+                    onClick={() => setMobilePage(0)}
+                    className="w-1.5 h-1.5 rounded-full bg-slate-300 hover:bg-slate-400 transition"
+                    aria-label="Go to Current Info page"
+                  />
+                  <button
+                    onClick={() => setMobilePage(1)}
+                    className="w-1.5 h-1.5 rounded-full bg-slate-300 hover:bg-slate-400 transition"
+                    aria-label="Go to Custom Range page"
                   />
                   <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" />
                 </div>

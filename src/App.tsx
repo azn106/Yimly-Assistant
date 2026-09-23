@@ -18,6 +18,8 @@ import { PeopleTab } from "./components/PeopleTab";
 import { PlacesTab } from "./components/PlacesTab";
 import { AlertsTab } from "./components/AlertsTab";
 import { SettingsTab } from "./components/SettingsTab";
+import { PreviewTestState, processPreviewTestMembers } from "./lib/previewTestMode";
+import { PreviewTestModeControls } from "./components/PreviewTestModeControls";
 
 export default function App() {
   const [status, setStatus] = useState<"checking" | "setup" | "login" | "authenticated" | "register">("checking");
@@ -37,6 +39,13 @@ export default function App() {
     }
   });
 
+  // Preview Test Mode State (Development & AI Studio Preview Only)
+  const [testState, setTestState] = useState<PreviewTestState>({
+    enabled: true,
+    viewingRole: "owner",
+    defaultDeviceId: "device_tracker.sim_iphone"
+  });
+
   // Circles States
   const [circles, setCircles] = useState<Circle[]>([]);
   const [selectedCircle, setSelectedCircle] = useState<Circle | null>(null);
@@ -49,6 +58,13 @@ export default function App() {
   // Selected Member State (Synced with MapComponent selection)
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null);
   const mapComponentRef = useRef<MapComponentHandle | null>(null);
+
+  // Process members and effective user for Preview Test Mode
+  const { members: displayMembers, effectiveUser: displayUser } = processPreviewTestMembers(
+    circleMembers,
+    user,
+    testState
+  );
 
   // Navigation Icon Pack State: "classic" | "minimal" | "rounded" | "bold" | "modern"
   const [navIconPack, setNavIconPack] = useState<NavIconPackId>(() => {
@@ -431,13 +447,15 @@ export default function App() {
       {/* AUTHENTICATED SYSTEM FLOW */}
       {status === "authenticated" ? (
         <div className="relative w-full h-full overflow-hidden">
+          {/* PREVIEW TEST MODE CONTROLS (Dev / AI Studio Preview Only) */}
+          <PreviewTestModeControls testState={testState} onChangeTestState={setTestState} />
           
           {/* 1. FULL-SCREEN DOMINANT MAP BACKGROUND */}
           <div className="absolute inset-0 z-0 w-full h-full">
             <MapComponent
               ref={mapComponentRef}
-              members={circleMembers}
-              currentUser={user}
+              members={displayMembers}
+              currentUser={displayUser}
               onRefresh={() => selectedCircle && fetchCircleMembers(selectedCircle.id)}
               loading={circlesLoading}
               mapStyle={user?.map_style}
@@ -446,6 +464,14 @@ export default function App() {
               unselectedIconSize={user?.map_unselected_icon_size}
               selectedMemberId={selectedMemberId}
               onSelectMemberId={setSelectedMemberId}
+              onSetDefaultDevice={(memberId, entityId) => {
+                if (testState.enabled) {
+                  setTestState((prev) => ({
+                    ...prev,
+                    defaultDeviceId: entityId
+                  }));
+                }
+              }}
             />
           </div>
 
@@ -578,7 +604,7 @@ export default function App() {
               }}
             >
               <div className="flex items-center gap-4 mx-auto">
-                {circleMembers.map((member) => {
+                {displayMembers.map((member) => {
                   const isSelected = selectedMemberId === member.id;
                   const memberColor = member.avatar_color || "#4f46e5";
 
@@ -686,7 +712,7 @@ export default function App() {
                 {/* Secondary Tab Content */}
                 {activeTab === "people" && (
                   <PeopleTab
-                    members={circleMembers}
+                    members={displayMembers}
                     loading={circlesLoading}
                     onSelectMember={(member) => {
                       setActiveTab("map");

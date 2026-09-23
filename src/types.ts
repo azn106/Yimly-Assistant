@@ -31,6 +31,7 @@ export interface MemberDeviceLocation {
   location_visibility?: "family" | "me_only";
   map_icon?: string;
   allow_find_my_device?: boolean;
+  is_default?: boolean;
 }
 
 export interface UserDevice {
@@ -43,6 +44,7 @@ export interface UserDevice {
   location_visibility: "family" | "me_only";
   map_icon: string;
   allow_find_my_device?: boolean;
+  is_default?: boolean;
 }
 
 export interface CircleMember {

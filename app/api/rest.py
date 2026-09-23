@@ -271,3 +271,99 @@ async def api_get_history_period(
         }
         for r in records
     ]
+
+
+@router.get("/api/devices")
+async def api_get_devices(
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(EntityState).where(
+        EntityState.user_id == user.id,
+        EntityState.domain == "device_tracker"
+    )
+    res = await db.execute(stmt)
+    entities = res.scalars().all()
+
+    devices_list = []
+    has_explicit_default = any(
+        isinstance(st.attributes, dict) and st.attributes.get("is_default")
+        for st in entities
+    )
+
+    for index, st in enumerate(entities):
+        attrs = st.attributes if isinstance(st.attributes, dict) else {}
+        is_def = bool(attrs.get("is_default", False if has_explicit_default else index == 0))
+        devices_list.append({
+            "entity_id": st.entity_id,
+            "name": attrs.get("friendly_name") or st.entity_id,
+            "platform": attrs.get("source_type") or "mobile_app",
+            "battery": attrs.get("battery") or attrs.get("battery_level") or 100,
+            "state": st.state,
+            "last_updated": st.last_updated.isoformat() if hasattr(st.last_updated, "isoformat") else str(st.last_updated),
+            "location_visibility": attrs.get("location_visibility", "family"),
+            "map_icon": attrs.get("map_icon", "📱 Phone"),
+            "is_default": is_def,
+            "allow_find_my_device": attrs.get("allow_find_my_device", True)
+        })
+
+    return devices_list
+
+
+@router.put("/api/devices/{entity_id:path}")
+async def api_update_device(
+    entity_id: str,
+    payload: Dict[str, Any],
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(EntityState).where(
+        EntityState.user_id == user.id,
+        EntityState.entity_id == entity_id
+    )
+    res = await db.execute(stmt)
+    st = res.scalar_one_or_none()
+    if not st:
+        raise HTTPException(status_code=404, detail="Device entity not found")
+
+    attrs = dict(st.attributes) if isinstance(st.attributes, dict) else {}
+
+    if "name" in payload:
+        attrs["friendly_name"] = payload["name"]
+    if "location_visibility" in payload:
+        attrs["location_visibility"] = payload["location_visibility"]
+    if "map_icon" in payload:
+        attrs["map_icon"] = payload["map_icon"]
+    if "allow_find_my_device" in payload:
+        attrs["allow_find_my_device"] = payload["allow_find_my_device"]
+
+    if "is_default" in payload and payload["is_default"] is True:
+        # Clear default flag on all other device trackers for this user
+        stmt_all = select(EntityState).where(
+            EntityState.user_id == user.id,
+            EntityState.domain == "device_tracker"
+        )
+        res_all = await db.execute(stmt_all)
+        for other_st in res_all.scalars().all():
+            other_attrs = dict(other_st.attributes) if isinstance(other_st.attributes, dict) else {}
+            other_attrs["is_default"] = (other_st.entity_id == entity_id)
+            other_st.attributes = other_attrs
+            db.add(other_st)
+        attrs["is_default"] = True
+
+    st.attributes = attrs
+    db.add(st)
+    await db.commit()
+
+    return {
+        "entity_id": st.entity_id,
+        "name": attrs.get("friendly_name") or st.entity_id,
+        "platform": attrs.get("source_type") or "mobile_app",
+        "battery": attrs.get("battery") or attrs.get("battery_level") or 100,
+        "state": st.state,
+        "last_updated": st.last_updated.isoformat() if hasattr(st.last_updated, "isoformat") else str(st.last_updated),
+        "location_visibility": attrs.get("location_visibility", "family"),
+        "map_icon": attrs.get("map_icon", "📱 Phone"),
+        "is_default": attrs.get("is_default", False),
+        "allow_find_my_device": attrs.get("allow_find_my_device", True)
+    }
