@@ -81,7 +81,7 @@ async def on_startup() -> None:
         raise e
 
 # Persistent uploads directory setup
-uploads_path = os.path.join(os.getcwd(), "uploads")
+uploads_path = settings.UPLOADS_DIR if settings.UPLOADS_DIR else os.path.join(os.getcwd(), "uploads")
 os.makedirs(os.path.join(uploads_path, "profile_pictures"), exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
 

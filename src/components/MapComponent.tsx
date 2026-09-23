@@ -3,7 +3,7 @@ import { motion, useMotionValue, animate } from "motion/react";
 import * as maplibregl from "maplibre-gl";
 import { CircleMember, LocationHistoryItem, UserInfo, MemberDeviceLocation } from "../types";
 import { getMapStyle } from "../lib/mapStyles";
-import { renderMarkerHTML, getMarkerDimensions } from "../lib/markerRenderer";
+import { renderMarkerHTML, getMarkerDimensions, getClusterScale, getBalloonOffsets, calculateDistanceMeters, StackedMemberInfo } from "../lib/markerRenderer";
 import { DeviceIcon } from "./DeviceIcon";
 import { 
   MapPin, 
@@ -108,7 +108,7 @@ function getCoordsFromPerimeter(s: number, minX: number, maxX: number, minY: num
 
   if (s < w) {
     return { x: minX + s, y: minY, edge: "top" as const };
-  } else if (s < w + h) {
+  } else if (s <= w + h) {
     return { x: maxX, y: minY + (s - w), edge: "right" as const };
   } else if (s < 2 * w + h) {
     return { x: maxX - (s - (w + h)), y: maxY, edge: "bottom" as const };
@@ -347,10 +347,11 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
   const axisLockRef = useRef<"x" | "y" | null>(null);
   const startTimeRef = useRef<number>(0);
 
-  const sheetY = useMotionValue(sheetState === "expanded" ? 0 : 404);
+  const COLLAPSED_SHEET_Y = 280;
+  const sheetY = useMotionValue(sheetState === "expanded" ? 0 : COLLAPSED_SHEET_Y);
   const isDraggingYRef = useRef<boolean>(false);
   const isGestureReleaseRef = useRef<boolean>(false);
-  const sheetStartPosRef = useRef<number>(sheetState === "expanded" ? 0 : 404);
+  const sheetStartPosRef = useRef<number>(sheetState === "expanded" ? 0 : COLLAPSED_SHEET_Y);
 
   const [dragOffsetX, setDragOffsetX] = useState<number>(0);
 
@@ -361,13 +362,13 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
       return;
     }
     if (!isDraggingYRef.current) {
-      animate(sheetY, sheetState === "expanded" ? 0 : 404, {
+      animate(sheetY, sheetState === "expanded" ? 0 : COLLAPSED_SHEET_Y, {
         type: "spring",
         stiffness: 300,
         damping: 30
       });
     }
-  }, [sheetState, sheetY]);
+  }, [sheetState, sheetY, COLLAPSED_SHEET_Y]);
 
   // Native TouchEvent handlers to completely own mobile gestures
   const handleTouchStart = useCallback((e: TouchEvent) => {
@@ -429,9 +430,9 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
       // Elastic resistance when dragging past boundaries
       if (newY < 0) {
         newY = newY * 0.2;
-      } else if (newY > 404) {
-        const overshoot = newY - 404;
-        newY = 404 + overshoot * 0.2;
+      } else if (newY > COLLAPSED_SHEET_Y) {
+        const overshoot = newY - COLLAPSED_SHEET_Y;
+        newY = COLLAPSED_SHEET_Y + overshoot * 0.2;
       }
       
       sheetY.set(newY);
@@ -443,7 +444,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
         setDragOffsetX(Math.max(-20, deltaX));
       }
     }
-  }, [mobilePage, sheetY]);
+  }, [mobilePage, sheetY, COLLAPSED_SHEET_Y]);
 
   const handleTouchEnd = useCallback((e: TouchEvent) => {
     if (!touchStartRef.current) return;
@@ -477,8 +478,8 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     const currentAxis = axisLockRef.current;
     
     if (currentAxis === "y") {
-      const thresholdY = 60; // snap threshold
-      const isFastY = velocityY > 0.3;
+      const thresholdY = 35; // responsive snap threshold
+      const isFastY = velocityY > 0.15;
       
       let targetState: "expanded" | "compact" = sheetState;
       if (sheetState === "expanded") {
@@ -495,7 +496,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
         }
       }
       
-      const targetY = targetState === "expanded" ? 0 : 404;
+      const targetY = targetState === "expanded" ? 0 : COLLAPSED_SHEET_Y;
       
       // Calculate release velocity in px/s, preserving natural gesture momentum
       const now = Date.now();
@@ -1316,115 +1317,6 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     return () => observer.disconnect();
   }, [selectedMemberId, isHistoryOpen, isCustomRangeActive, isCardHidden]);
 
-  // Update Markers & Sync Selection
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    const currentMemberIds = new Set<string>();
-
-    membersWithLocation.forEach((member) => {
-      const primaryDevice = member.devices?.[0];
-      if (!primaryDevice || primaryDevice.longitude === null || primaryDevice.latitude === null) return;
-
-      const markerKey = `member_${member.id}`;
-      currentMemberIds.add(markerKey);
-
-      const isSelected = selectedMemberId === member.id;
-      const baseColor = member.avatar_color || "#4f46e5";
-
-      // Effective marker dimensions strictly following user customization settings
-      const unselSize = typeof unselectedIconSize === "number" && unselectedIconSize > 0 ? unselectedIconSize : 36;
-      const selSize = typeof selectedIconSize === "number" && selectedIconSize > 0 ? selectedIconSize : 48;
-      const markerSize = isSelected ? selSize : unselSize;
-      const activePinType = mapPinType || "classic_pin";
-
-      const dims = getMarkerDimensions(activePinType, markerSize);
-
-      let marker = markersRef.current[markerKey];
-
-      if (!marker) {
-        // Create custom MapLibre HTML marker element with bottom anchor
-        const el = document.createElement("div");
-        el.className = "custom-member-marker cursor-pointer transition-transform duration-200";
-        el.style.zIndex = isSelected ? "20" : "5";
-
-        marker = new maplibregl.Marker({ element: el, anchor: dims.anchor })
-          .setLngLat([primaryDevice.longitude, primaryDevice.latitude])
-          .addTo(map);
-
-        markersRef.current[markerKey] = marker;
-      } else {
-        marker.setLngLat([primaryDevice.longitude, primaryDevice.latitude]);
-      }
-
-      const el = marker.getElement();
-      el.style.zIndex = isSelected ? "25" : "5";
-      el.style.width = `${dims.width}px`;
-      el.style.height = `${dims.height}px`;
-
-      // Wire click handler to freshest member coordinates
-      el.onclick = (e) => {
-        e.stopPropagation();
-        const freshMember = membersWithLocRef.current.find(m => m.id === member.id) || member;
-        handleFocusMember(freshMember);
-      };
-
-      const deviceIcon = primaryDevice.map_icon ? primaryDevice.map_icon.split(" ")[0] : "📱";
-      const batteryVal = primaryDevice.battery !== undefined && primaryDevice.battery !== null ? primaryDevice.battery : null;
-      const photoUrl = member.profile_picture_url || "";
-      const memberName = member.display_name;
-      const renderKey = `${markerKey}_${activePinType}_${isSelected}_${dims.width}_${dims.height}_${baseColor}_${photoUrl}_${memberName}_${deviceIcon}_${batteryVal}`;
-
-      // Smart DOM cache: only update innerHTML if visual appearance actually changed (prevents flickering)
-      if (el.dataset.renderKey !== renderKey) {
-        el.dataset.renderKey = renderKey;
-        el.innerHTML = renderMarkerHTML({
-          pinType: activePinType,
-          baseColor,
-          isSelected,
-          size: markerSize,
-          photoUrl,
-          memberName,
-          deviceIcon,
-          batteryLevel: batteryVal,
-          showBattery: true
-        });
-      }
-    });
-
-    // Cleanup markers for removed members
-    Object.keys(markersRef.current).forEach((key) => {
-      if (!currentMemberIds.has(key)) {
-        markersRef.current[key].remove();
-        delete markersRef.current[key];
-      }
-    });
-
-    // Auto-fit initial bounds when markers first load if nothing is selected
-    if (selectedMemberId === null && membersWithLocation.length > 0 && map.getZoom() <= 2) {
-      if (membersWithLocation.length === 1) {
-        const pDev = membersWithLocation[0].devices?.[0];
-        if (pDev && pDev.longitude !== null && pDev.latitude !== null) {
-          map.flyTo({ center: [pDev.longitude, pDev.latitude], zoom: 15, duration: 800 });
-        }
-      } else {
-        const bounds = new maplibregl.LngLatBounds();
-        membersWithLocation.forEach(m => {
-          m.devices?.forEach(d => {
-            if (d.longitude !== null && d.latitude !== null) {
-              bounds.extend([d.longitude, d.latitude]);
-            }
-          });
-        });
-
-        if (!bounds.isEmpty()) {
-          map.fitBounds(bounds, { padding: 80, maxZoom: 16 });
-        }
-      }
-    }
-  }, [membersWithLocation, selectedMemberId, selectedIconSize, unselectedIconSize, handleFocusMember]);
-
   // Viewport-tracking state to trigger re-renders on pan/zoom/resize
   const [indicatorTrigger, setIndicatorTrigger] = useState(0);
 
@@ -1449,6 +1341,231 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     };
   }, []);
 
+  // Update Markers & Sync Selection (with individual balloon markers fanning out for same-location members)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    // 1. Group members by screen proximity (30px threshold based on visible rendered screen distance)
+    const container = map.getContainer();
+    const screenCenterX = container ? container.clientWidth / 2 : window.innerWidth / 2;
+    const screenCenterY = container ? container.clientHeight / 2 : window.innerHeight / 2;
+
+    interface MemberScreenData {
+      member: CircleMember;
+      primaryDevice: MemberDeviceLocation;
+      screenPoint: { x: number; y: number };
+      distToCenter: number;
+    }
+
+    const validMembers: MemberScreenData[] = [];
+    membersWithLocation.forEach((member) => {
+      const primaryDevice = member.devices?.[0];
+      if (!primaryDevice || primaryDevice.longitude === null || primaryDevice.latitude === null) return;
+      try {
+        const screenPoint = map.project([primaryDevice.longitude, primaryDevice.latitude]);
+        const distToCenter = Math.hypot(screenPoint.x - screenCenterX, screenPoint.y - screenCenterY);
+        validMembers.push({ member, primaryDevice, screenPoint, distToCenter });
+      } catch {
+        validMembers.push({
+          member,
+          primaryDevice,
+          screenPoint: { x: screenCenterX, y: screenCenterY },
+          distToCenter: 0
+        });
+      }
+    });
+
+    interface MemberCluster {
+      members: CircleMember[];
+      minDistToCenter: number;
+    }
+
+    const clusters: MemberCluster[] = [];
+
+    validMembers.forEach((item) => {
+      let matchedCluster: MemberCluster | null = null;
+
+      for (const cluster of clusters) {
+        // Within 30px screen distance of any member in this cluster
+        const isWithin30px = cluster.members.some((m) => {
+          const mDev = m.devices?.[0];
+          if (!mDev || mDev.longitude === null || mDev.latitude === null) return false;
+          try {
+            const p = map.project([mDev.longitude, mDev.latitude]);
+            return Math.hypot(item.screenPoint.x - p.x, item.screenPoint.y - p.y) <= 30;
+          } catch {
+            return false;
+          }
+        });
+
+        if (isWithin30px) {
+          matchedCluster = cluster;
+          break;
+        }
+      }
+
+      if (matchedCluster) {
+        matchedCluster.members.push(item.member);
+        matchedCluster.minDistToCenter = Math.min(matchedCluster.minDistToCenter, item.distToCenter);
+      } else {
+        clusters.push({
+          members: [item.member],
+          minDistToCenter: item.distToCenter
+        });
+      }
+    });
+
+    // Find the cluster (individual or stacked group) closest to the center of the visible map/screen
+    let closestClusterIndex = 0;
+    let minCenterDist = Infinity;
+
+    clusters.forEach((cluster, cIdx) => {
+      if (cluster.minDistToCenter < minCenterDist) {
+        minCenterDist = cluster.minDistToCenter;
+        closestClusterIndex = cIdx;
+      }
+    });
+
+    const currentMarkerKeys = new Set<string>();
+
+    clusters.forEach((cluster, cIdx) => {
+      const clusterCount = cluster.members.length;
+      const isClusterPrimary = clusters.length === 1 || cIdx === closestClusterIndex;
+      const activePinType = mapPinType || "classic_pin";
+
+      const unselBase = typeof unselectedIconSize === "number" && unselectedIconSize > 0 ? unselectedIconSize : 36;
+      const selBase = typeof selectedIconSize === "number" && selectedIconSize > 0 ? selectedIconSize : 48;
+
+      const stackedMembers: StackedMemberInfo[] = cluster.members.map((m) => {
+        const pDev = m.devices?.[0];
+        const devIcon = pDev?.map_icon ? pDev.map_icon.split(" ")[0] : "📱";
+        const batt = pDev?.battery !== undefined && pDev?.battery !== null ? pDev.battery : null;
+        return {
+          id: m.id,
+          memberName: m.display_name,
+          baseColor: m.avatar_color || "#4f46e5",
+          photoUrl: m.profile_picture_url || null,
+          deviceIcon: devIcon,
+          batteryLevel: batt
+        };
+      });
+
+      cluster.members.forEach((member, idx) => {
+        const primaryDevice = member.devices?.[0];
+        if (!primaryDevice || primaryDevice.longitude === null || primaryDevice.latitude === null) return;
+
+        const markerKey = `member_${member.id}`;
+        currentMarkerKeys.add(markerKey);
+
+        const isSelected = selectedMemberId === member.id;
+        const baseSize = isSelected ? selBase : unselBase;
+        const dims = getMarkerDimensions(activePinType, baseSize);
+
+        // Geographically anchored to exact GPS coordinates
+        const markerLng = primaryDevice.longitude;
+        const markerLat = primaryDevice.latitude;
+
+        // Layering: selected gets 100, primary (closest to center) gets 60-69, others tiered by distance
+        let markerZIndex = isSelected
+          ? 100
+          : isClusterPrimary
+          ? 60 + idx
+          : Math.max(10, 40 - Math.min(25, Math.floor(cluster.minDistToCenter / 30))) + idx;
+
+        let marker = markersRef.current[markerKey];
+
+        if (!marker) {
+          const el = document.createElement("div");
+          el.className = "custom-member-marker cursor-pointer select-none";
+          el.style.zIndex = String(markerZIndex);
+
+          marker = new maplibregl.Marker({
+            element: el,
+            anchor: dims.anchor,
+            offset: [0, 0]
+          })
+            .setLngLat([markerLng, markerLat])
+            .addTo(map);
+
+          markersRef.current[markerKey] = marker;
+        } else {
+          marker.setLngLat([markerLng, markerLat]);
+          marker.setOffset([0, 0]);
+        }
+
+        const el = marker.getElement();
+        el.style.zIndex = String(markerZIndex);
+        el.style.width = `${dims.width}px`;
+        el.style.height = `${dims.height}px`;
+
+        // Direct tap on member's individual marker
+        el.onclick = (e) => {
+          e.stopPropagation();
+          const freshMember = membersWithLocRef.current.find((m) => m.id === member.id) || member;
+          handleFocusMember(freshMember);
+        };
+
+        const baseColor = member.avatar_color || "#4f46e5";
+        const deviceIcon = primaryDevice.map_icon ? primaryDevice.map_icon.split(" ")[0] : "📱";
+        const batteryVal = primaryDevice.battery !== undefined && primaryDevice.battery !== null ? primaryDevice.battery : null;
+        const photoUrl = member.profile_picture_url || "";
+        const memberName = member.display_name;
+
+        const stackFingerprint = cluster.members.map((m) => `${m.id}_${m.avatar_color}_${m.profile_picture_url || ""}`).join("|");
+        const renderKey = `${markerKey}_${activePinType}_${isSelected}_${dims.width}_${dims.height}_${baseColor}_${photoUrl}_${memberName}_${deviceIcon}_${batteryVal}_${isClusterPrimary}_${stackFingerprint}`;
+
+        if (el.dataset.renderKey !== renderKey) {
+          el.dataset.renderKey = renderKey;
+          el.innerHTML = renderMarkerHTML({
+            pinType: activePinType,
+            baseColor,
+            isSelected,
+            size: baseSize,
+            photoUrl,
+            memberName,
+            deviceIcon,
+            batteryLevel: batteryVal,
+            showBattery: true,
+            isPrimary: isClusterPrimary,
+            stackedMembers: clusterCount > 1 ? stackedMembers : undefined
+          });
+        }
+      });
+    });
+
+    // Cleanup markers for removed members
+    Object.keys(markersRef.current).forEach((key) => {
+      if (!currentMarkerKeys.has(key)) {
+        markersRef.current[key].remove();
+        delete markersRef.current[key];
+      }
+    });
+
+    // Auto-fit initial bounds when markers first load if nothing is selected
+    if (selectedMemberId === null && membersWithLocation.length > 0 && map.getZoom() <= 2) {
+      if (membersWithLocation.length === 1) {
+        const pDev = membersWithLocation[0].devices?.[0];
+        if (pDev && pDev.longitude !== null && pDev.latitude !== null) {
+          map.flyTo({ center: [pDev.longitude, pDev.latitude], zoom: 15, duration: 800 });
+        }
+      } else {
+        const bounds = new maplibregl.LngLatBounds();
+        membersWithLocation.forEach((m) => {
+          m.devices?.forEach((d) => {
+            if (d.longitude !== null && d.latitude !== null) {
+              bounds.extend([d.longitude, d.latitude]);
+            }
+          });
+        });
+
+        if (!bounds.isEmpty()) {
+          map.fitBounds(bounds, { padding: 80, maxZoom: 16 });
+        }
+      }
+    }
+  }, [membersWithLocation, selectedMemberId, selectedIconSize, unselectedIconSize, handleFocusMember, mapPinType, indicatorTrigger]);
+
   const renderOffScreenIndicators = () => {
     const map = mapRef.current;
     if (!map) return null;
@@ -1464,17 +1581,14 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     const W = container.clientWidth;
     const H = container.clientHeight;
 
-    // Define smart adaptive safe area boundaries
-    const topMargin = 96; // Clears the circle selector and header buttons
-    const leftMargin = 24; // Clears left side buttons
-    const rightMargin = 24; // Clears right side buttons
-    const cardPadding = getBottomPadding(isCardHidden);
-    const bottomMargin = Math.max(88, cardPadding + 16); // Dynamic clearance for bottom navigation and selected member card
-
+    // Left/right indicators use previous horizontal margin (24px) to clear UI buttons,
+    // while top and bottom boundaries remain at the full visible screen viewport (0 and H).
+    const leftMargin = 24;
+    const rightMargin = 24;
     const minX = leftMargin;
     const maxX = W - rightMargin;
-    const minY = topMargin;
-    const maxY = H - bottomMargin;
+    const minY = 0;
+    const maxY = H;
 
     if (maxX <= minX || maxY <= minY) return null;
 
@@ -1510,7 +1624,19 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
 
       if (isOffScreen) {
         // Find clipping boundary intersection coordinate
-        const { x, y, edge } = getIntersectionPoint(cx, cy, px, py, minX, maxX, minY, maxY);
+        let { x, y, edge } = getIntersectionPoint(cx, cy, px, py, minX, maxX, minY, maxY);
+
+        // TOP/BOTTOM edge + horizontal position → hang LEFT or RIGHT based on which side the member is closer to
+        if (edge === "top" || edge === "bottom") {
+          const hangLeft = px < cx;
+          if (hangLeft) {
+            edge = "left";
+            x = minX;
+          } else {
+            edge = "right";
+            x = maxX;
+          }
+        }
 
         // Calculate direction angle from viewport center to target coordinate
         const angleRad = Math.atan2(py - cy, px - cx);
@@ -1523,12 +1649,8 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
         const w = maxX - minX;
         const h = maxY - minY;
         let s = 0;
-        if (edge === "top") {
-          s = x - minX;
-        } else if (edge === "right") {
+        if (edge === "right") {
           s = w + (y - minY);
-        } else if (edge === "bottom") {
-          s = w + h + (maxX - x);
         } else {
           s = 2 * w + h + (maxY - y);
         }
@@ -1563,6 +1685,9 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
         const current = offScreenMembers[i];
         const next = offScreenMembers[(i + 1) % offScreenMembers.length];
 
+        // Only resolve collisions between indicators sharing the same edge (left or right)
+        if (current.edge !== next.edge) continue;
+
         let diff = next.s - current.s;
         if (diff < 0) diff += L;
 
@@ -1570,6 +1695,16 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
           const overlap = minDistance - diff;
           current.s = (current.s - overlap / 2 + L) % L;
           next.s = (next.s + overlap / 2) % L;
+          // Clamp to stay strictly on their respective vertical edge
+          const w = maxX - minX;
+          const h = maxY - minY;
+          if (current.edge === "right") {
+            current.s = Math.max(w, Math.min(w + h, current.s));
+            next.s = Math.max(w, Math.min(w + h, next.s));
+          } else {
+            current.s = Math.max(2 * w + h, Math.min(2 * w + 2 * h, current.s));
+            next.s = Math.max(2 * w + h, Math.min(2 * w + 2 * h, next.s));
+          }
           changed = true;
         }
       }
@@ -1577,36 +1712,35 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     }
 
     // Convert resolved 1D perimeter coordinates back to 2D screen positions and apply smart scaling
-    const indicators = offScreenMembers.map((item) => {
-      const { x, y, edge } = getCoordsFromPerimeter(item.s, minX, maxX, minY, maxY);
+    const indicators = offScreenMembers
+      .map((item) => {
+        const { x, y, edge } = getCoordsFromPerimeter(item.s, minX, maxX, minY, maxY);
 
-      // Distance to closest corner for corner safe compression
-      let distanceToCorner = 999;
-      if (edge === "top" || edge === "bottom") {
-        distanceToCorner = Math.min(x - minX, maxX - x);
-      } else {
-        distanceToCorner = Math.min(y - minY, maxY - y);
-      }
+        // Distance to closest corner for corner safe compression (vertical edges)
+        const distanceToCorner = Math.min(y - minY, maxY - y);
 
-      // Smooth viewport scale based on client width
-      const viewportFactor = Math.min(1, Math.max(0, (W - 375) / (1200 - 375)));
-      let baseSize = 34 + viewportFactor * 10; // 34px on phone, scales gracefully to 44px on tablet/desktop
+        // Smooth viewport scale based on client width
+        const viewportFactor = Math.min(1, Math.max(0, (W - 375) / (1200 - 375)));
+        let baseSize = 34 + viewportFactor * 10; // 34px on phone, scales gracefully to 44px on tablet/desktop
 
-      // Corner safe sizing: reduce slightly near corners so indicator fits perfectly without clipping
-      const cornerSpace = 44;
-      if (distanceToCorner < cornerSpace) {
-        const ratio = 0.78 + 0.22 * (distanceToCorner / cornerSpace); // Minimum scale limit of 78%
-        baseSize *= ratio;
-      }
+        // Corner safe sizing: reduce slightly near corners so indicator fits perfectly without clipping
+        const cornerSpace = 44;
+        if (distanceToCorner < cornerSpace) {
+          const ratio = 0.78 + 0.22 * (distanceToCorner / cornerSpace); // Minimum scale limit of 78%
+          baseSize *= ratio;
+        }
 
-      return {
-        ...item,
-        x,
-        y,
-        edge,
-        baseSize,
-      };
-    });
+        return {
+          ...item,
+          x,
+          y,
+          edge,
+          baseSize,
+        };
+      })
+      .filter((item) => item.edge === "left" || item.edge === "right");
+
+    if (indicators.length === 0) return null;
 
     return (
       <div className="absolute inset-0 pointer-events-none z-10 overflow-hidden">
@@ -1872,10 +2006,10 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
               setSheetState("expanded");
             }
           }}
-          className="absolute bottom-[88px] sm:bottom-22 left-3 right-3 sm:left-1/2 sm:-translate-x-1/2 sm:w-[520px] sm:max-w-[calc(100vw-2rem)] z-30 pointer-events-auto"
+          className="absolute bottom-[-24px] left-3 right-3 sm:left-1/2 sm:-translate-x-1/2 sm:w-[520px] sm:max-w-[calc(100vw-2rem)] z-30 pointer-events-auto"
         >
           <div 
-            className="bg-white/85 backdrop-blur-2xl p-4 sm:p-5 rounded-3xl shadow-[0_12px_40px_rgba(0,0,0,0.08)] border border-white/80 transition-all duration-300 space-y-3"
+            className="bg-white/85 backdrop-blur-2xl p-4 sm:p-5 pb-9 rounded-t-3xl shadow-[0_-12px_40px_rgba(0,0,0,0.08)] border-t border-x border-white/80 transition-all duration-300 space-y-3 relative z-10"
           >
             {/* Small Drag Handle at the top of the sheet (Mobile Only) */}
             {isMobile && !isHistoryOpen && (
@@ -2076,17 +2210,19 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
 
                   {/* Member Avatar */}
                   <div
-                    className="w-9 h-9 rounded-full text-white font-black text-xs flex items-center justify-center select-none shadow-sm overflow-hidden shrink-0"
+                    className="w-9 h-9 text-white font-black text-xs flex items-center justify-center select-none overflow-hidden shrink-0"
                     style={{
                       backgroundColor: selectedMember.avatar_color || "#4f46e5",
-                      boxShadow: `0 0 0 2px white, 0 2px 6px ${selectedMember.avatar_color || '#4f46e5'}40`
+                      clipPath: "url(#squircle-clip-app)",
+                      filter: `drop-shadow(0 2px 4px ${selectedMember.avatar_color || '#4f46e5'}40)`
                     }}
                   >
                     {selectedMember.profile_picture_url ? (
                       <img
                         src={selectedMember.profile_picture_url}
                         alt={selectedMember.display_name}
-                        className="w-full h-full object-cover rounded-full"
+                        className="w-full h-full object-cover"
+                        style={{ clipPath: "url(#squircle-clip-app)" }}
                       />
                     ) : (
                       selectedMember.display_name.charAt(0).toUpperCase()
@@ -2130,78 +2266,57 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                 </div>
               ) : (
                 /* EXPANDED STATE (OR DESKTOP STATE) */
-                <div className="space-y-4 animate-in fade-in duration-200">
-                  {/* Profile Header Row */}
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3 min-w-0 flex-1">
-                      {/* Compact Back Button */}
+                <div className="space-y-3 animate-in fade-in duration-200">
+                  {/* Profile Header Controls Row */}
+                  <div className="flex items-center justify-between min-h-[32px]">
+                    {navMemberHistoryRef.current.length > 0 ? (
                       <button
                         onClick={handleNavBack}
                         className="p-1.5 rounded-full text-slate-500 hover:text-slate-800 hover:bg-slate-100/90 active:bg-slate-200 transition cursor-pointer shrink-0"
-                        title="Back to previous state"
+                        title="Back to previous member"
                         aria-label="Back"
                       >
                         <ChevronLeft className="w-4.5 h-4.5" />
                       </button>
-
-                      {/* Large Avatar */}
-                      <div
-                        onClick={() => {
-                          if (isMobile) setSheetState("compact");
-                        }}
-                        className={`w-12 h-12 rounded-full text-white font-black text-base flex items-center justify-center select-none shadow-sm overflow-hidden shrink-0 ${isMobile ? "cursor-pointer" : ""}`}
-                        style={{
-                          backgroundColor: selectedMember.avatar_color || "#4f46e5",
-                          boxShadow: `0 0 0 2px white, 0 2px 6px ${selectedMember.avatar_color || '#4f46e5'}40`
-                        }}
-                      >
-                        {selectedMember.profile_picture_url ? (
-                          <img
-                            src={selectedMember.profile_picture_url}
-                            alt={selectedMember.display_name}
-                            className="w-full h-full object-cover rounded-full"
-                          />
-                        ) : (
-                          selectedMember.display_name.charAt(0).toUpperCase()
-                        )}
-                      </div>
-
-                      {/* Member Name and Battery / Time */}
-                      <div className="min-w-0 flex-1">
-                        <h4 className="text-base sm:text-lg font-black text-slate-800 truncate leading-tight">
-                          {selectedMember.display_name}
-                        </h4>
-                        {hasLinkedDevice && (
-                          <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 font-medium leading-tight mt-1 truncate">
-                            {primaryDevice?.battery !== undefined && primaryDevice?.battery !== null && (
-                              <span className="flex items-center gap-1 shrink-0 font-bold text-slate-600">
-                                <Battery className="w-3.5 h-3.5 text-emerald-500" />
-                                {primaryDevice.battery}%
-                              </span>
-                            )}
-                            {primaryDevice?.battery !== undefined && primaryDevice?.last_updated && (
-                              <span className="text-slate-300">•</span>
-                            )}
-                            {primaryDevice?.last_updated && (
-                              <span className="flex items-center gap-1 truncate text-slate-400">
-                                <Clock className="w-3.5 h-3.5 shrink-0" />
-                                {new Date(primaryDevice.last_updated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                    ) : (
+                      <div className="w-7" />
+                    )}
 
                     {/* Close button at top right of the sheet */}
                     <button
                       onClick={handleCloseCard}
-                      className="p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+                      className="p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer shrink-0"
                       title="Close card"
                       aria-label="Close card"
                     >
                       <X className="w-4 h-4" />
                     </button>
+                  </div>
+
+                  {/* Member Name and Battery / Time */}
+                  <div className="text-center space-y-1">
+                    <h4 className="text-base sm:text-lg font-black text-slate-800 truncate leading-tight">
+                      {selectedMember.display_name}
+                    </h4>
+                    {hasLinkedDevice && (
+                      <div className="flex flex-wrap items-center justify-center gap-1.5 text-xs text-slate-500 font-medium leading-tight truncate">
+                        {primaryDevice?.battery !== undefined && primaryDevice?.battery !== null && (
+                          <span className="flex items-center gap-1 shrink-0 font-bold text-slate-600">
+                            <Battery className="w-3.5 h-3.5 text-emerald-500" />
+                            {primaryDevice.battery}%
+                          </span>
+                        )}
+                        {primaryDevice?.battery !== undefined && primaryDevice?.last_updated && (
+                          <span className="text-slate-300">•</span>
+                        )}
+                        {primaryDevice?.last_updated && (
+                          <span className="flex items-center gap-1 truncate text-slate-400">
+                            <Clock className="w-3.5 h-3.5 shrink-0" />
+                            {new Date(primaryDevice.last_updated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* Location Info Block (Address + Coordinates) */}
@@ -2345,56 +2460,47 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
       {selectedMember && !isCardHidden && isMobile && (
         <motion.div
           ref={cardContainerRef}
-          className="fixed bottom-[calc(88px+env(safe-area-inset-bottom,16px))] left-3 right-3 h-[440px] z-30 pointer-events-auto bg-white/85 backdrop-blur-2xl border border-white/80 shadow-[0_-12px_40px_rgba(0,0,0,0.08)] rounded-t-[32px] rounded-b-2xl overflow-hidden select-none touch-none"
+          className="fixed bottom-[-24px] left-3 right-3 h-[430px] z-30 pointer-events-auto select-none touch-none"
           style={{
             y: sheetY
           }}
         >
-          {/* Centered Drag Handle / Tap to expand-collapse */}
-          <div
-            onClick={() => setSheetState(sheetState === "expanded" ? "compact" : "expanded")}
-            className="w-full pt-3 pb-2 cursor-pointer flex justify-center items-center select-none animate-pulse-slow"
-            title="Drag or tap to resize"
-          >
-            <div className="w-12 h-1 bg-slate-300/80 rounded-full hover:bg-slate-400 transition" />
-          </div>
-
-          {/* Draggable/Swipeable Content Pages Container (Always rendered for fluid animations, clipped via parent overflow) */}
-          <div className="w-full h-[390px] overflow-hidden relative">
-            <motion.div
-              animate={{
-                x: `calc(${-mobilePage * 50}% + ${dragOffsetX}px)`
-              }}
-              transition={{ type: "spring", stiffness: 300, damping: 30 }}
-              className="flex w-[200%] h-full"
+          <div className="w-full h-full bg-white/85 backdrop-blur-2xl border-t border-x border-white/80 shadow-[0_-12px_40px_rgba(0,0,0,0.08)] rounded-t-[32px] overflow-hidden relative z-10 pt-2 pb-8">
+            {/* Centered Drag Handle / Tap to expand-collapse */}
+            <div
+              onClick={() => setSheetState(sheetState === "expanded" ? "compact" : "expanded")}
+              className="w-full pt-1 pb-2 cursor-pointer flex justify-center items-center select-none animate-pulse-slow"
+              title="Drag or tap to resize"
             >
-              {/* PAGE 1: Current Info */}
-              <div className="w-1/2 h-full px-5 pb-4 flex flex-col justify-between overflow-y-auto scrollbar-none select-none">
-                <div className="space-y-3.5">
-                  {/* Large Avatar */}
-                  <div
-                    className="w-18 h-18 rounded-full text-white font-black text-xl flex items-center justify-center select-none shadow-md overflow-hidden shrink-0 mx-auto mt-1"
-                    style={{
-                      backgroundColor: selectedMember.avatar_color || "#4f46e5",
-                      boxShadow: `0 0 0 3px white, 0 4px 12px ${selectedMember.avatar_color || '#4f46e5'}40`
-                    }}
-                  >
-                    {selectedMember.profile_picture_url ? (
-                      <img
-                        src={selectedMember.profile_picture_url}
-                        alt={selectedMember.display_name}
-                        className="w-full h-full object-cover rounded-full"
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      selectedMember.display_name.charAt(0).toUpperCase()
-                    )}
-                  </div>
+              <div className="w-12 h-1 bg-slate-300/80 rounded-full hover:bg-slate-400 transition" />
+            </div>
 
-                  {/* Member Name */}
-                  <h3 className="text-lg font-black text-slate-800 text-center leading-tight">
-                    {selectedMember.display_name}
-                  </h3>
+            {/* Draggable/Swipeable Content Pages Container (Always rendered for fluid animations, clipped via parent overflow) */}
+            <div className="w-full h-[330px] overflow-hidden relative">
+              <motion.div
+                animate={{
+                  x: `calc(${-mobilePage * 50}% + ${dragOffsetX}px)`
+                }}
+                transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                className="flex w-[200%] h-full"
+              >
+                {/* PAGE 1: Current Info */}
+                <div className="w-1/2 h-full px-5 pb-4 flex flex-col justify-between overflow-y-auto scrollbar-none select-none">
+                  <div className="space-y-3">
+                    {/* Member Name */}
+                    <div
+                      onClick={() => {
+                        if (sheetState === "compact") {
+                          setSheetState("expanded");
+                        }
+                      }}
+                      className="cursor-pointer select-none py-1 -my-1"
+                      title={sheetState === "compact" ? "Swipe up or tap to expand" : undefined}
+                    >
+                      <h3 className="text-lg font-black text-slate-800 text-center leading-tight">
+                        {selectedMember.display_name}
+                      </h3>
+                    </div>
 
                   {hasLinkedDevice ? (
                     <>
@@ -2603,8 +2709,9 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
               </div>
             </motion.div>
           </div>
-        </motion.div>
-      )}
+        </div>
+      </motion.div>
+    )}
 
       {/* 4. REOPEN / SHOW CARD FLOATING BUTTON (WHEN TEMPORARILY COLLAPSED) */}
       {selectedMember && isCardHidden && (

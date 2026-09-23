@@ -43,11 +43,11 @@ export const PeopleTab: React.FC<PeopleTabProps> = ({ members, loading, onSelect
               {/* Left Side: Avatar & Display Name */}
               <div className="flex items-center gap-3.5">
                 <div 
-                  className="h-10 w-10 text-white font-black text-sm rounded-full flex items-center justify-center select-none shadow-sm transition-all duration-300 overflow-hidden shrink-0 group-hover:scale-105"
+                  className="h-10 w-10 text-white font-black text-sm flex items-center justify-center select-none transition-all duration-300 overflow-hidden shrink-0 group-hover:scale-105"
                   style={{ 
                     backgroundColor: member.avatar_color || "#4f46e5", 
-                    border: member.avatar_color ? "2px solid white" : "none",
-                    boxShadow: member.avatar_color ? `0 0 0 2px ${member.avatar_color}` : "none" 
+                    clipPath: "url(#squircle-clip-app)",
+                    filter: `drop-shadow(0 2px 4px ${member.avatar_color || '#4f46e5'}40)`
                   }}
                 >
                   {member.profile_picture_url ? (
@@ -55,7 +55,8 @@ export const PeopleTab: React.FC<PeopleTabProps> = ({ members, loading, onSelect
                       src={member.profile_picture_url}
                       alt={member.display_name}
                       referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover rounded-full"
+                      className="w-full h-full object-cover"
+                      style={{ clipPath: "url(#squircle-clip-app)" }}
                     />
                   ) : (
                     member.display_name.charAt(0).toUpperCase()

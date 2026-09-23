@@ -88,3 +88,127 @@ body,
   display: none !important;
 }
 
+/* Gentle continuous breathing animations for map markers */
+@keyframes markerBreathePrimary {
+  0%, 100% {
+    transform: scale(1.027);
+  }
+  50% {
+    transform: scale(0.973);
+  }
+}
+
+@keyframes markerBreatheSecondary {
+  0%, 100% {
+    transform: scale(0.9257);
+  }
+  50% {
+    transform: scale(0.8716);
+  }
+}
+
+.marker-breathe-primary {
+  animation: markerBreathePrimary 3.6s ease-in-out infinite;
+  transform-origin: center bottom;
+  will-change: transform;
+}
+
+.marker-breathe-secondary {
+  animation: markerBreatheSecondary 3.6s ease-in-out infinite;
+  transform-origin: center bottom;
+  will-change: transform;
+}
+
+/* Same-location stacked member smooth crossfade rotations */
+@keyframes markerCrossfade2 {
+  0% { opacity: 0; }
+  8% { opacity: 1; }
+  42% { opacity: 1; }
+  50% { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+@keyframes markerCrossfade3 {
+  0% { opacity: 0; }
+  6% { opacity: 1; }
+  27% { opacity: 1; }
+  33.33% { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+@keyframes markerCrossfade4 {
+  0% { opacity: 0; }
+  5% { opacity: 1; }
+  20% { opacity: 1; }
+  25% { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+@keyframes markerCrossfade5 {
+  0% { opacity: 0; }
+  4% { opacity: 1; }
+  16% { opacity: 1; }
+  20% { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+@keyframes markerCrossfade6 {
+  0% { opacity: 0; }
+  3.5% { opacity: 1; }
+  13.1% { opacity: 1; }
+  16.66% { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+@keyframes markerCrossfade7 {
+  0% { opacity: 0; }
+  3% { opacity: 1; }
+  11.2% { opacity: 1; }
+  14.28% { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+@keyframes markerCrossfade8 {
+  0% { opacity: 0; }
+  2.5% { opacity: 1; }
+  10% { opacity: 1; }
+  12.5% { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+.marker-crossfade-2 {
+  animation: markerCrossfade2 7.2s ease-in-out infinite;
+}
+
+.marker-crossfade-3 {
+  animation: markerCrossfade3 10.8s ease-in-out infinite;
+}
+
+.marker-crossfade-4 {
+  animation: markerCrossfade4 14.4s ease-in-out infinite;
+}
+
+.marker-crossfade-5 {
+  animation: markerCrossfade5 18s ease-in-out infinite;
+}
+
+.marker-crossfade-6 {
+  animation: markerCrossfade6 21.6s ease-in-out infinite;
+}
+
+.marker-crossfade-7 {
+  animation: markerCrossfade7 25.2s ease-in-out infinite;
+}
+
+.marker-crossfade-8 {
+  animation: markerCrossfade8 28.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .marker-breathe-primary,
+  .marker-breathe-secondary {
+    animation: none !important;
+  }
+}
+
+

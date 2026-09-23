@@ -393,14 +393,18 @@ export const CircleSelector: React.FC<CircleSelectorProps> = ({
                       >
                         <div className="flex items-center gap-2.5 min-w-0">
                           <div
-                            className="w-7 h-7 rounded-full text-white font-extrabold text-[11px] flex items-center justify-center overflow-hidden shrink-0 shadow-xs"
-                            style={{ backgroundColor: m.avatar_color || "#4f46e5" }}
+                            className="w-7 h-7 text-white font-extrabold text-[11px] flex items-center justify-center overflow-hidden shrink-0"
+                            style={{ 
+                              backgroundColor: m.avatar_color || "#4f46e5",
+                              clipPath: "url(#squircle-clip-app)"
+                            }}
                           >
                             {m.profile_picture_url ? (
                               <img
                                 src={m.profile_picture_url}
                                 alt={m.display_name}
                                 className="w-full h-full object-cover"
+                                style={{ clipPath: "url(#squircle-clip-app)" }}
                               />
                             ) : (
                               m.display_name?.charAt(0).toUpperCase() || <User className="w-3.5 h-3.5" />

@@ -3,7 +3,6 @@ import { createPortal } from "react-dom";
 import QRCode from "qrcode";
 import { UserInfo, Circle, UserDevice } from "../types";
 import { MAP_STYLES } from "../lib/mapStyles";
-import { MAP_PIN_TYPES, renderMarkerHTML } from "../lib/markerRenderer";
 import { MapLivePreview } from "./MapLivePreview";
 import { QRScannerModal } from "./QRScannerModal";
 import { DeviceIcon } from "./DeviceIcon";
@@ -215,12 +214,10 @@ const CustomColorPickerPopover: React.FC<CustomColorPickerPopoverProps> = ({
     const s = x / rect.width;
     const v = 1 - y / rect.height;
 
-    setHsv((prev) => {
-      const next = { ...prev, s, v };
-      const newHex = hsvToHex(next.h, next.s, next.v);
-      onChange(newHex);
-      return next;
-    });
+    const nextHsv = { ...hsv, s, v };
+    setHsv(nextHsv);
+    const newHex = hsvToHex(nextHsv.h, nextHsv.s, nextHsv.v);
+    onChange(newHex);
   };
 
   const handleSatValPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -248,12 +245,10 @@ const CustomColorPickerPopover: React.FC<CustomColorPickerPopoverProps> = ({
 
     const h = Math.round((x / rect.width) * 360);
 
-    setHsv((prev) => {
-      const next = { ...prev, h };
-      const newHex = hsvToHex(next.h, next.s, next.v);
-      onChange(newHex);
-      return next;
-    });
+    const nextHsv = { ...hsv, h };
+    setHsv(nextHsv);
+    const newHex = hsvToHex(nextHsv.h, nextHsv.s, nextHsv.v);
+    onChange(newHex);
   };
 
   const handleHuePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1096,18 +1091,15 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   // SECTION 3: MAPS STATE
   // ----------------------------------------------------
   const [mapStyle, setMapStyle] = useState<string>(user?.map_style || "osm");
-  const [mapPinType, setMapPinType] = useState<string>(user?.map_pin_type || "classic_pin");
   const [selectedIconSize, setSelectedIconSize] = useState<number>(
     user?.map_selected_icon_size || 48
   );
   const [unselectedIconSize, setUnselectedIconSize] = useState<number>(
     user?.map_unselected_icon_size || 36
   );
-  const [isPinDropdownOpen, setIsPinDropdownOpen] = useState<boolean>(false);
 
   useEffect(() => {
     if (user?.map_style) setMapStyle(user.map_style);
-    if (user?.map_pin_type) setMapPinType(user.map_pin_type);
     if (user?.map_selected_icon_size) setSelectedIconSize(user.map_selected_icon_size);
     if (user?.map_unselected_icon_size) setUnselectedIconSize(user.map_unselected_icon_size);
   }, [user]);
@@ -1115,7 +1107,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   // Persist Maps settings
   const persistMapPreferences = async (updates: {
     map_style?: string;
-    map_pin_type?: string;
     map_selected_icon_size?: number;
     map_unselected_icon_size?: number;
   }) => {
@@ -1141,12 +1132,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const handleMapStyleChange = (newStyle: string) => {
     setMapStyle(newStyle);
     persistMapPreferences({ map_style: newStyle });
-  };
-
-  const handleMapPinTypeChange = (newPinType: string) => {
-    setMapPinType(newPinType);
-    setIsPinDropdownOpen(false);
-    persistMapPreferences({ map_pin_type: newPinType });
   };
 
   const handleSelectedIconSizeChange = (size: number) => {
@@ -1407,14 +1392,19 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-2xl bg-slate-50/70 border border-slate-100">
               <div className="flex items-center gap-4">
                 <div
-                  className="w-16 h-16 rounded-full flex items-center justify-center text-white font-black text-xl shadow-sm border-2 border-white overflow-hidden shrink-0"
-                  style={{ backgroundColor: avatarColor }}
+                  className="w-16 h-16 flex items-center justify-center text-white font-black text-xl overflow-hidden shrink-0"
+                  style={{ 
+                    backgroundColor: avatarColor,
+                    clipPath: "url(#squircle-clip-app)",
+                    filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.15))"
+                  }}
                 >
                   {user?.profile_picture_url ? (
                     <img
                       src={user.profile_picture_url}
                       alt={displayName}
-                      className="w-full h-full object-cover rounded-full"
+                      className="w-full h-full object-cover"
+                      style={{ clipPath: "url(#squircle-clip-app)" }}
                     />
                   ) : (
                     <span>{(displayName || username || "U").charAt(0).toUpperCase()}</span>
@@ -1821,7 +1811,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <div>
               <MapLivePreview
                 styleId={mapStyle}
-                pinType={mapPinType}
+                pinType={user?.map_pin_type || "classic_pin"}
                 selectedIconSize={selectedIconSize}
                 unselectedIconSize={unselectedIconSize}
                 userColor={avatarColor}
@@ -1832,7 +1822,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             </div>
 
             {/* Controls (Bottom Half) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 pt-2">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-2">
               {/* 2. Map Tile Style Dropdown */}
               <div className="space-y-2">
                 <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
@@ -1858,95 +1848,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 </p>
               </div>
 
-              {/* 3. Map Pin Type Dropdown */}
-              <div className="space-y-2 relative">
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                  Map Pin Type
-                </label>
-                
-                <div className="relative">
-                  <button
-                    type="button"
-                    id="map-pin-type-dropdown-trigger"
-                    onClick={() => setIsPinDropdownOpen(!isPinDropdownOpen)}
-                    className="w-full flex items-center justify-between px-3 py-1.5 bg-white border border-slate-200/80 rounded-xl text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 shadow-xs cursor-pointer transition hover:bg-slate-50/80"
-                  >
-                    <div className="flex items-center gap-2 overflow-hidden">
-                      {/* Visual Marker Preview Thumbnail */}
-                      <div
-                        className="w-6 h-7 shrink-0 flex items-center justify-center overflow-hidden"
-                        dangerouslySetInnerHTML={{
-                          __html: renderMarkerHTML({
-                            pinType: mapPinType,
-                            baseColor: avatarColor || "#4f46e5",
-                            isSelected: true,
-                            size: 20,
-                            photoUrl: user?.profile_picture_url,
-                            memberName: (displayName || username || "U").charAt(0).toUpperCase(),
-                            showBattery: false
-                          })
-                        }}
-                      />
-                      <span className="truncate text-xs font-bold text-slate-800">
-                        {MAP_PIN_TYPES.find((p) => p.id === mapPinType)?.name || "Classic Pin"}
-                      </span>
-                    </div>
-                    <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${isPinDropdownOpen ? "rotate-180" : ""}`} />
-                  </button>
-
-                  {/* Dropdown Options Popup */}
-                  {isPinDropdownOpen && (
-                    <>
-                      <div
-                        className="fixed inset-0 z-40"
-                        onClick={() => setIsPinDropdownOpen(false)}
-                      />
-                      <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-white/95 backdrop-blur-xl border border-slate-200/90 rounded-2xl shadow-xl max-h-72 overflow-y-auto p-1.5 space-y-0.5 divide-y divide-slate-100/60">
-                        {MAP_PIN_TYPES.map((pin) => {
-                          const isCurrent = pin.id === mapPinType;
-                          return (
-                            <button
-                              key={pin.id}
-                              type="button"
-                              onClick={() => handleMapPinTypeChange(pin.id)}
-                              className={`w-full flex items-center justify-between p-2 rounded-xl transition text-left cursor-pointer ${
-                                isCurrent ? "bg-indigo-50/80 text-indigo-900 font-bold" : "hover:bg-slate-50 text-slate-700"
-                              }`}
-                            >
-                              <div className="flex items-center gap-2.5">
-                                <div
-                                  className="w-6 h-7 shrink-0 flex items-center justify-center"
-                                  dangerouslySetInnerHTML={{
-                                    __html: renderMarkerHTML({
-                                      pinType: pin.id,
-                                      baseColor: avatarColor || "#4f46e5",
-                                      isSelected: isCurrent,
-                                      size: 20,
-                                      photoUrl: user?.profile_picture_url,
-                                      memberName: (displayName || username || "U").charAt(0).toUpperCase(),
-                                      showBattery: false
-                                    })
-                                  }}
-                                />
-                                <div>
-                                  <div className="text-xs font-bold leading-tight">{pin.name}</div>
-                                  <div className="text-[10px] text-slate-400 font-medium leading-tight">{pin.description}</div>
-                                </div>
-                              </div>
-                              {isCurrent && <Check className="w-4 h-4 text-indigo-600 shrink-0 ml-1" />}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </>
-                  )}
-                </div>
-                <p className="text-[11px] text-slate-400 font-medium">
-                  {MAP_PIN_TYPES.find((p) => p.id === mapPinType)?.description || "Select marker pin geometry"}
-                </p>
-              </div>
-
-              {/* 4. Selected Member Icon Size Slider */}
+              {/* 3. Selected Member Icon Size Slider */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">
@@ -3013,14 +2915,19 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 {/* Profile Photo Preview */}
                 <div className="flex flex-col items-center justify-center p-5 bg-slate-50/80 rounded-2xl border border-dashed border-slate-200 mb-5 text-center">
                   <div
-                    className="w-20 h-20 rounded-full flex items-center justify-center text-white font-black text-2xl shadow-md border-2 border-white overflow-hidden mb-3.5 relative shrink-0"
-                    style={{ backgroundColor: avatarColor }}
+                    className="w-20 h-20 flex items-center justify-center text-white font-black text-2xl overflow-hidden mb-3.5 relative shrink-0"
+                    style={{ 
+                      backgroundColor: avatarColor,
+                      clipPath: "url(#squircle-clip-app)",
+                      filter: "drop-shadow(0 4px 8px rgba(0,0,0,0.15))"
+                    }}
                   >
                     {user?.profile_picture_url ? (
                       <img
                         src={user.profile_picture_url}
                         alt={displayName}
-                        className="w-full h-full object-cover rounded-full"
+                        className="w-full h-full object-cover"
+                        style={{ clipPath: "url(#squircle-clip-app)" }}
                       />
                     ) : (
                       <span>{(displayName || username || "U").charAt(0).toUpperCase()}</span>

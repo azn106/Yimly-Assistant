@@ -504,14 +504,15 @@ export default function App() {
             {/* Profile Avatar Pill (Settings & Account) */}
             <div 
               onClick={() => setActiveTab("settings")}
-              className={`w-8 h-8 rounded-full text-white font-extrabold text-xs flex items-center justify-center cursor-pointer shadow-sm transition-all duration-150 hover:scale-105 active:scale-95 overflow-hidden shrink-0 ${
+              className={`w-8 h-8 text-white font-extrabold text-xs flex items-center justify-center cursor-pointer transition-all duration-150 hover:scale-105 active:scale-95 overflow-hidden shrink-0 ${
                 activeTab === "settings"
                   ? "ring-2 ring-slate-900 ring-offset-2 scale-105"
                   : ""
               }`}
               style={{
                 backgroundColor: user?.avatar_color || "#4f46e5",
-                boxShadow: `0 0 0 2px white, 0 2px 8px ${user?.avatar_color || '#4f46e5'}60`
+                clipPath: "url(#squircle-clip-app)",
+                filter: `drop-shadow(0 2px 4px ${user?.avatar_color || '#4f46e5'}60)`
               }}
               title={`${user?.display_name} (Settings)`}
             >
@@ -519,7 +520,8 @@ export default function App() {
                 <img
                   src={user.profile_picture_url}
                   alt={user.display_name}
-                  className="w-full h-full object-cover rounded-full"
+                  className="w-full h-full object-cover"
+                  style={{ clipPath: "url(#squircle-clip-app)" }}
                 />
               ) : (
                 user?.display_name?.charAt(0).toUpperCase()
@@ -564,80 +566,85 @@ export default function App() {
           )}
 
           {/* FLOATING NAVIGATION DOCK (MOBILE) */}
-          <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/85 backdrop-blur-2xl pt-1 pb-[calc(2px+env(safe-area-inset-bottom,4px))] rounded-t-[24px] rounded-b-none border-t border-white/80 shadow-[0_-8px_30px_rgb(0,0,0,0.08)] pointer-events-auto max-h-[144px] overflow-hidden">
+          <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 pointer-events-none">
+            {/* White/Frosted background card: straight square top edge, rising ~1/4 up the 48px member icons */}
+            <div className="absolute inset-x-0 bottom-0 top-[44px] bg-white/85 backdrop-blur-2xl rounded-none border-t border-white/80 shadow-[0_-8px_30px_rgb(0,0,0,0.08)] pointer-events-auto" />
+
             <div 
-              className="flex items-center gap-4 overflow-x-auto overflow-y-hidden scrollbar-none py-3 px-4 justify-start touch-pan-x"
+              className="relative z-10 flex items-center gap-4 overflow-x-auto scrollbar-none pt-2 pb-[calc(8px+env(safe-area-inset-bottom,4px))] px-4 justify-start md:justify-center touch-pan-x pointer-events-auto w-full"
               onTouchMove={(e) => {
                 // Completely isolate vertical drag gestures so they cannot bubble and trigger vertical overscroll on the main page/body
                 e.stopPropagation();
               }}
             >
-              {circleMembers.map((member) => {
-                const isSelected = selectedMemberId === member.id;
-                const memberColor = member.avatar_color || "#4f46e5";
+              <div className="flex items-center gap-4 mx-auto">
+                {circleMembers.map((member) => {
+                  const isSelected = selectedMemberId === member.id;
+                  const memberColor = member.avatar_color || "#4f46e5";
 
-                return (
-                  <button
-                    key={member.id}
-                    onClick={() => {
-                      setActiveTab("map");
-                      if (mapComponentRef.current) {
-                        mapComponentRef.current.focusMember(member);
-                      } else {
-                        setSelectedMemberId(member.id);
-                      }
-                    }}
-                    className="flex flex-col items-center gap-1 shrink-0 cursor-pointer min-w-[80px] focus:outline-none"
-                  >
-                    {/* Ring Indicator & Avatar */}
-                    <div
-                      className={`relative w-20 h-20 transition duration-200 ${
-                        isSelected ? "scale-110" : "hover:scale-105"
-                      }`}
-                      style={{
-                        backgroundColor: isSelected ? memberColor : `${memberColor}25`,
-                        clipPath: "url(#squircle-clip-app)",
-                        boxShadow: isSelected ? `0 0 16px ${memberColor}40` : "none",
+                  return (
+                    <button
+                      key={member.id}
+                      onClick={() => {
+                        setActiveTab("map");
+                        if (mapComponentRef.current) {
+                          mapComponentRef.current.focusMember(member);
+                        } else {
+                          setSelectedMemberId(member.id);
+                        }
                       }}
+                      className="flex flex-col items-center gap-1 shrink-0 cursor-pointer w-12 focus:outline-none"
                     >
-                      {/* White Border Spacer */}
-                      <div 
-                        className="absolute inset-[2.5px] bg-white flex items-center justify-center"
-                        style={{ clipPath: "url(#squircle-clip-app)" }}
+                      {/* Ring Indicator & Avatar */}
+                      <div
+                        className={`relative w-12 h-12 transition duration-200 ${
+                          isSelected ? "scale-110" : "hover:scale-105"
+                        }`}
+                        style={{
+                          backgroundColor: isSelected ? memberColor : `${memberColor}25`,
+                          clipPath: "url(#squircle-clip-app)",
+                          boxShadow: isSelected ? `0 0 12px ${memberColor}40` : "none",
+                        }}
                       >
-                        {/* Profile Image & Background */}
-                        <div
-                          className="absolute inset-[2.5px] text-white font-black text-2xl flex items-center justify-center overflow-hidden"
-                          style={{ 
-                            backgroundColor: memberColor,
-                            clipPath: "url(#squircle-clip-app)"
-                          }}
+                        {/* White Border Spacer */}
+                        <div 
+                          className="absolute inset-[1.5px] bg-white flex items-center justify-center"
+                          style={{ clipPath: "url(#squircle-clip-app)" }}
                         >
-                          {member.profile_picture_url ? (
-                            <img
-                              src={member.profile_picture_url}
-                              alt={member.display_name}
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover"
-                              style={{ clipPath: "url(#squircle-clip-app)" }}
-                            />
-                          ) : (
-                            member.display_name.charAt(0).toUpperCase()
-                          )}
+                          {/* Profile Image & Background */}
+                          <div
+                            className="absolute inset-[1.5px] text-white font-black text-sm flex items-center justify-center overflow-hidden"
+                            style={{ 
+                              backgroundColor: memberColor,
+                              clipPath: "url(#squircle-clip-app)"
+                            }}
+                          >
+                            {member.profile_picture_url ? (
+                              <img
+                                src={member.profile_picture_url}
+                                alt={member.display_name}
+                                referrerPolicy="no-referrer"
+                                className="w-full h-full object-cover"
+                                style={{ clipPath: "url(#squircle-clip-app)" }}
+                              />
+                            ) : (
+                              member.display_name.charAt(0).toUpperCase()
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    {/* Display Name */}
-                    <span
-                      className={`text-[10px] font-extrabold tracking-wide uppercase transition duration-200 truncate max-w-[100px] ${
-                        isSelected ? "text-indigo-600 font-black scale-105" : "text-slate-500"
-                      }`}
-                    >
-                      {member.display_name}
-                    </span>
-                  </button>
-                );
-              })}
+                      {/* Display Name */}
+                      <span
+                        className={`text-[10px] font-extrabold tracking-wide uppercase transition duration-200 truncate w-15 max-w-[60px] text-center ${
+                          isSelected ? "text-indigo-600 font-black scale-105" : "text-slate-500"
+                        }`}
+                      >
+                        {member.display_name}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             {/* SVG Definitions for true mathematical squircle clips */}
             <svg className="absolute w-0 h-0 pointer-events-none" width="0" height="0">
