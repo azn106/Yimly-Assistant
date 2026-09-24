@@ -162,6 +162,19 @@ export interface GeofenceStateData {
   last_updated: string;
 }
 
+export interface DeviceBatteryStateData {
+  entity_id: string;
+  last_known_battery: number | null;
+  low_battery_alert_triggered: boolean;
+}
+
+export interface DeviceOfflineStateData {
+  entity_id: string;
+  last_seen_at: string;
+  device_offline_alert_triggered: boolean;
+  first_telemetry_received: boolean;
+}
+
 export interface YimlyPreviewDatabase {
   users: UserData[];
   circles: CircleData[];
@@ -171,6 +184,8 @@ export interface YimlyPreviewDatabase {
   places: PlaceData[];
   alerts: AlertData[];
   geofence_states: GeofenceStateData[];
+  device_battery_states: DeviceBatteryStateData[];
+  device_offline_states: DeviceOfflineStateData[];
 }
 
 
@@ -472,7 +487,9 @@ function loadDB(): YimlyPreviewDatabase {
       location_history: getDeterministicPreviewHistory(),
       places: [],
       alerts: [],
-      geofence_states: []
+      geofence_states: [],
+      device_battery_states: [],
+      device_offline_states: []
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(initialDB, null, 2));
     return initialDB;
@@ -492,7 +509,9 @@ function loadDB(): YimlyPreviewDatabase {
       location_history: existingHistory,
       places: parsed.places || [],
       alerts: parsed.alerts || [],
-      geofence_states: parsed.geofence_states || []
+      geofence_states: parsed.geofence_states || [],
+      device_battery_states: parsed.device_battery_states || [],
+      device_offline_states: parsed.device_offline_states || []
     };
 
     // If loaded history was empty or upgraded, persist it
@@ -510,7 +529,9 @@ function loadDB(): YimlyPreviewDatabase {
       location_history: getDeterministicPreviewHistory(),
       places: [],
       alerts: [],
-      geofence_states: []
+      geofence_states: [],
+      device_battery_states: [],
+      device_offline_states: []
     };
   }
 }
@@ -1811,6 +1832,166 @@ function evaluateGeofencingPreview(userId: number, entityId: string, lat: number
   }
 }
 
+function evaluateLowBatteryPreview(userId: number, entityId: string, battery: number | null | undefined): void {
+  if (battery == null) return;
+  const batteryVal = Number(battery);
+  if (isNaN(batteryVal) || batteryVal < 0 || batteryVal > 100) return;
+
+  const userCircles = db.circle_members.filter((m) => m.user_id === userId).map((m) => m.circle_id);
+  if (userCircles.length === 0) return;
+
+  const trackedUser = db.users.find((u) => u.id === userId);
+  if (!trackedUser) return;
+
+  db.device_battery_states = db.device_battery_states || [];
+  let dstate = db.device_battery_states.find((ds) => ds.entity_id === entityId);
+
+  if (!dstate) {
+    // First observed sample initialization. Avoid triggers.
+    db.device_battery_states.push({
+      entity_id: entityId,
+      last_known_battery: batteryVal,
+      low_battery_alert_triggered: batteryVal < 15
+    });
+    saveDB(db);
+    return;
+  }
+
+  dstate.last_known_battery = batteryVal;
+  saveDB(db);
+
+  // Recovery check
+  if (batteryVal >= 15) {
+    if (dstate.low_battery_alert_triggered) {
+      dstate.low_battery_alert_triggered = false;
+      saveDB(db);
+    }
+    return;
+  }
+
+  // Battery is below 15% here
+  if (!dstate.low_battery_alert_triggered) {
+    dstate.low_battery_alert_triggered = true;
+    saveDB(db);
+
+    const deviceName = entityId.replace("device_tracker.", "").replace(/_/g, " ");
+
+    for (const circleId of userCircles) {
+      const circleMembers = db.circle_members.filter((m) => m.circle_id === circleId);
+      for (const cm of circleMembers) {
+        if (cm.user_id === userId) continue;
+
+        const recipient = db.users.find((u) => u.id === cm.user_id);
+        if (!recipient || recipient.notify_low_battery === false) continue;
+
+        const newAlert: AlertData = {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          circle_id: circleId,
+          user_id: cm.user_id,
+          target_user_id: userId,
+          alert_type: "low_battery",
+          title: `Low battery: ${trackedUser.display_name}`,
+          message: `${trackedUser.display_name}'s ${deviceName} battery is low (${Math.round(batteryVal)}%).`,
+          read: false,
+          created_at: new Date().toISOString()
+        };
+
+        db.alerts = db.alerts || [];
+        db.alerts.push(newAlert);
+        saveDB(db);
+
+        broadcastStateUpdate({
+          event_type: "alert_created",
+          data: newAlert
+        });
+      }
+    }
+  }
+}
+
+function updateDeviceOfflinePreview(userId: number, entityId: string): void {
+  db.device_offline_states = db.device_offline_states || [];
+  let dstate = db.device_offline_states.find((ds) => ds.entity_id === entityId);
+  const nowStr = new Date().toISOString();
+  if (!dstate) {
+    db.device_offline_states.push({
+      entity_id: entityId,
+      last_seen_at: nowStr,
+      device_offline_alert_triggered: false,
+      first_telemetry_received: true
+    });
+  } else {
+    dstate.last_seen_at = nowStr;
+    dstate.first_telemetry_received = true;
+    dstate.device_offline_alert_triggered = false;
+  }
+  saveDB(db);
+}
+
+function checkOfflineDevicesPreview(): void {
+  db = loadDB();
+  db.device_offline_states = db.device_offline_states || [];
+  // 15 minutes threshold in milliseconds
+  const thresholdMs = 15 * 60 * 1000;
+  const nowMs = Date.now();
+
+  // Find all active preview entities to extract userId
+  const activeTrackers = db.entity_states.filter((es) => es.domain === "device_tracker");
+
+  for (const ds of db.device_offline_states) {
+    if (!ds.first_telemetry_received) continue;
+
+    const tracker = activeTrackers.find((t) => t.entity_id === ds.entity_id);
+    if (!tracker) continue;
+    const userId = tracker.user_id;
+
+    const lastSeenMs = new Date(ds.last_seen_at).getTime();
+    const isOffline = (nowMs - lastSeenMs) > thresholdMs;
+
+    if (isOffline && !ds.device_offline_alert_triggered) {
+      ds.device_offline_alert_triggered = true;
+      saveDB(db);
+
+      const trackedUser = db.users.find((u) => u.id === userId);
+      if (!trackedUser) continue;
+
+      const deviceName = ds.entity_id.replace("device_tracker.", "").replace(/_/g, " ");
+      const userCircles = db.circle_members.filter((m) => m.user_id === userId).map((m) => m.circle_id);
+
+      for (const circleId of userCircles) {
+        const circleMembers = db.circle_members.filter((m) => m.circle_id === circleId);
+        for (const cm of circleMembers) {
+          if (cm.user_id === userId) continue;
+
+          const recipient = db.users.find((u) => u.id === cm.user_id);
+          if (!recipient || recipient.notify_device_offline === false) continue;
+
+          const newAlert: AlertData = {
+            id: Date.now() + Math.floor(Math.random() * 1000),
+            circle_id: circleId,
+            user_id: cm.user_id,
+            target_user_id: userId,
+            alert_type: "device_offline",
+            title: `Device offline: ${trackedUser.display_name}`,
+            message: `${trackedUser.display_name}'s ${deviceName} has gone offline.`,
+            read: false,
+            created_at: new Date().toISOString()
+          };
+
+          db.alerts = db.alerts || [];
+          db.alerts.push(newAlert);
+          saveDB(db);
+
+          broadcastStateUpdate({
+            event_type: "alert_created",
+            data: newAlert
+          });
+        }
+      }
+    }
+  }
+}
+
 // Home Assistant Companion App Webhook & Telemetry Receiver
 app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, res) => {
   const { type, data } = req.body;
@@ -1875,6 +2056,18 @@ app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, re
         evaluateGeofencingPreview(userId, entityId, Number(lat), Number(lon));
       } catch (err) {
         console.error("Error in evaluateGeofencingPreview:", err);
+      }
+
+      try {
+        evaluateLowBatteryPreview(userId, entityId, battery);
+      } catch (err) {
+        console.error("Error in evaluateLowBatteryPreview:", err);
+      }
+
+      try {
+        updateDeviceOfflinePreview(userId, entityId);
+      } catch (err) {
+        console.error("Error in updateDeviceOfflinePreview:", err);
       }
 
       // Broadcast update over WebSocket
@@ -1975,8 +2168,42 @@ app.get(["/api/history/period", "/api/history/period/:timestamp"], authenticateT
   res.json(userHistory);
 });
 
+app.post("/api/test/set-device-last-seen", (req, res) => {
+  const { entity_id, minutes_ago } = req.body;
+  db = loadDB();
+  db.device_offline_states = db.device_offline_states || [];
+  let dstate = db.device_offline_states.find((ds) => ds.entity_id === entity_id);
+  const backDate = new Date(Date.now() - minutes_ago * 60 * 1000).toISOString();
+  if (dstate) {
+    dstate.last_seen_at = backDate;
+  } else {
+    db.device_offline_states.push({
+      entity_id,
+      last_seen_at: backDate,
+      device_offline_alert_triggered: false,
+      first_telemetry_received: true
+    });
+  }
+  saveDB(db);
+  res.json({ success: true, last_seen_at: backDate });
+});
+
+app.post("/api/test/check-offline", (req, res) => {
+  checkOfflineDevicesPreview();
+  res.json({ success: true });
+});
+
 // Express / Vite Integration
 async function startServer() {
+  // Start background offline checking interval every 5 seconds
+  setInterval(() => {
+    try {
+      checkOfflineDevicesPreview();
+    } catch (err) {
+      console.error("Error running checkOfflineDevicesPreview interval:", err);
+    }
+  }, 5000);
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

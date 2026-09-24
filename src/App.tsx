@@ -14,7 +14,7 @@ import {
   X
 } from "lucide-react";
 
-import { Circle, CircleMember, UserInfo, Place } from "./types";
+import { Circle, CircleMember, UserInfo, Place, Alert } from "./types";
 import { MapComponent, MapComponentHandle } from "./components/MapComponent";
 import { PeopleTab } from "./components/PeopleTab";
 import { PlacesTab } from "./components/PlacesTab";
@@ -58,6 +58,11 @@ export default function App() {
   // Places State
   const [places, setPlaces] = useState<Place[]>([]);
 
+  // Alerts State
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+
   // Tab State: "map" | "people" | "places" | "alerts" | "settings"
   const [activeTab, setActiveTab] = useState<"map" | "people" | "places" | "alerts" | "settings">("map");
 
@@ -97,6 +102,62 @@ export default function App() {
     }
   }, []);
 
+  // Fetch Alerts for selected circle
+  const fetchAlerts = useCallback(async (circleId: number, silent = false) => {
+    const token = localStorage.getItem("access_token");
+    if (!token || !circleId) {
+      setAlerts([]);
+      return;
+    }
+    if (!silent) {
+      setAlertsLoading(true);
+      setAlertsError(null);
+    }
+    try {
+      const res = await fetch(`/api/circles/${circleId}/alerts`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (res.ok) {
+        const data: Alert[] = await res.json();
+        // Sort newest first
+        data.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        setAlerts(data);
+      } else {
+        if (!silent) setAlertsError("Failed to fetch alerts from the server.");
+      }
+    } catch (err) {
+      console.warn("Unable to fetch alerts:", err);
+      if (!silent) setAlertsError("Network error: Failed to fetch alerts.");
+    } finally {
+      if (!silent) setAlertsLoading(false);
+    }
+  }, []);
+
+  // Mark an alert as read
+  const markAlertAsRead = useCallback(async (circleId: number, alertId: number) => {
+    const token = localStorage.getItem("access_token");
+    if (!token || !circleId) return;
+
+    try {
+      const res = await fetch(`/api/circles/${circleId}/alerts/${alertId}/read`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (res.ok) {
+        // Optimistically update local state
+        setAlerts((prev) =>
+          prev.map((a) => (a.id === alertId ? { ...a, read: true } : a))
+        );
+      }
+    } catch (err) {
+      console.error("Failed to mark alert as read:", err);
+    }
+  }, []);
+
   // Run on mount to check existing session, setup status, and register SW
   useEffect(() => {
     checkSessionAndSetup();
@@ -107,18 +168,21 @@ export default function App() {
   useEffect(() => {
     if (status !== "authenticated" || !selectedCircle) {
       setPlaces([]);
+      setAlerts([]);
       return;
     }
 
     fetchCircleMembers(selectedCircle.id); // Load immediately on circle switch
     fetchPlaces(selectedCircle.id);
+    fetchAlerts(selectedCircle.id);
 
     const interval = setInterval(() => {
       fetchCircleMembers(selectedCircle.id, true); // Silent background reload
+      fetchAlerts(selectedCircle.id, true); // Silent background alerts update
     }, 15000); // 15 seconds real-time update loop
 
     return () => clearInterval(interval);
-  }, [status, selectedCircle, fetchPlaces]);
+  }, [status, selectedCircle, fetchPlaces, fetchAlerts]);
 
   const registerServiceWorker = () => {
     if ("serviceWorker" in navigator) {
@@ -542,13 +606,20 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab("alerts")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition-all duration-150 cursor-pointer active:scale-95 ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition-all duration-150 cursor-pointer active:scale-95 relative ${
                 activeTab === "alerts"
                   ? "bg-slate-900 text-white shadow-md"
                   : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
               }`}
             >
-              <Bell className="w-4 h-4" />
+              <div className="relative">
+                <Bell className="w-4 h-4" />
+                {alerts.filter((a) => !a.read).length > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-rose-500 text-[8px] font-black text-white ring-1 ring-white">
+                    {alerts.filter((a) => !a.read).length}
+                  </span>
+                )}
+              </div>
               <span>Alerts</span>
             </button>
 
@@ -761,7 +832,14 @@ export default function App() {
                 )}
 
                 {activeTab === "alerts" && (
-                  <AlertsTab />
+                  <AlertsTab
+                    alerts={alerts}
+                    loading={alertsLoading}
+                    error={alertsError}
+                    onMarkAsRead={(alertId) => selectedCircle && markAlertAsRead(selectedCircle.id, alertId)}
+                    selectedCircle={selectedCircle}
+                    circleMembers={circleMembers}
+                  />
                 )}
 
                 {activeTab === "settings" && (

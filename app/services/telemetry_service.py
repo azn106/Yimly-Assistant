@@ -151,6 +151,8 @@ class TelemetryService:
 
         # Update last_seen_at for the device
         device.last_seen_at = now
+        device.first_telemetry_received = True
+        device.device_offline_alert_triggered = False
         await db.commit()
 
         # Run geofence evaluation
@@ -159,6 +161,13 @@ class TelemetryService:
         except Exception as e:
             import logging
             logging.getLogger(__name__).exception(f"Error in geofencing evaluator: {e}")
+
+        # Run low battery evaluation
+        try:
+            await TelemetryService._evaluate_low_battery(db, device, data)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).exception(f"Error in low-battery evaluator: {e}")
 
         return {"status": "ok"}
 
@@ -423,3 +432,167 @@ class TelemetryService:
             results[item.unique_id] = {"success": True}
 
         return results
+
+    @staticmethod
+    async def _evaluate_low_battery(
+        db: AsyncSession,
+        device: Device,
+        data: LocationUpdateData
+    ) -> None:
+        if not device.user_id:
+            return
+
+        if data.battery is None:
+            return
+
+        try:
+            battery_val = float(data.battery)
+        except (ValueError, TypeError):
+            return
+
+        if not (0.0 <= battery_val <= 100.0):
+            return
+
+        # Check for first-ever sample initialization
+        if device.last_known_battery is None:
+            device.last_known_battery = battery_val
+            device.low_battery_alert_triggered = (battery_val < 15.0)
+            await db.commit()
+            return
+
+        device.last_known_battery = battery_val
+        await db.commit()
+
+        # Recovery check
+        if battery_val >= 15.0:
+            if device.low_battery_alert_triggered:
+                device.low_battery_alert_triggered = False
+                await db.commit()
+            return
+
+        # Battery is below 15% here
+        if not device.low_battery_alert_triggered:
+            device.low_battery_alert_triggered = True
+            await db.commit()
+
+            from app.db.models import CircleMember, User
+            from app.schemas.alerts import AlertCreate
+            from app.services.alert_service import AlertService
+
+            stmt_user = select(User).where(User.id == device.user_id)
+            res_user = await db.execute(stmt_user)
+            tracked_user = res_user.scalar_one_or_none()
+            if not tracked_user:
+                return
+
+            stmt_circles = select(CircleMember.circle_id).where(CircleMember.user_id == device.user_id)
+            res_circles = await db.execute(stmt_circles)
+            circle_ids = res_circles.scalars().all()
+
+            for circle_id in circle_ids:
+                stmt_members = select(User).join(CircleMember).where(CircleMember.circle_id == circle_id)
+                res_members = await db.execute(stmt_members)
+                members = res_members.scalars().all()
+
+                for m in members:
+                    if m.id == device.user_id:
+                        continue
+
+                    if not getattr(m, "notify_low_battery", True):
+                        continue
+
+                    title = f"Low battery: {tracked_user.display_name}"
+                    message = f"{tracked_user.display_name}'s {device.device_name} battery is low ({int(battery_val)}%)."
+
+                    await AlertService.create_alert(
+                        db=db,
+                        alert_in=AlertCreate(
+                            circle_id=circle_id,
+                            user_id=m.id,
+                            target_user_id=tracked_user.id,
+                            alert_type="low_battery",
+                            title=title,
+                            message=message
+                        )
+                    )
+
+    @staticmethod
+    async def check_offline_devices(db: AsyncSession) -> None:
+        from datetime import datetime, timezone, timedelta
+        from sqlalchemy import select
+        from app.db.models import Device, User, CircleMember
+        from app.schemas.alerts import AlertCreate
+        from app.services.alert_service import AlertService
+        from app.core.config import settings
+
+        # Get settings threshold
+        threshold_minutes = settings.DEVICE_OFFLINE_THRESHOLD_MINUTES
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+
+        # Retrieve all devices
+        stmt_devices = select(Device)
+        res_devices = await db.execute(stmt_devices)
+        devices = res_devices.scalars().all()
+
+        for d in devices:
+            if not d.user_id:
+                continue
+
+            # First observation safety: must actually have produced valid telemetry
+            if not d.first_telemetry_received:
+                continue
+
+            # Check if device was seen before the cutoff
+            last_seen_aware = d.last_seen_at
+            if last_seen_aware.tzinfo is None:
+                last_seen_aware = last_seen_aware.replace(tzinfo=timezone.utc)
+
+            is_offline = last_seen_aware < cutoff_time
+
+            if is_offline:
+                # State transition to offline
+                if not d.device_offline_alert_triggered:
+                    d.device_offline_alert_triggered = True
+                    await db.commit()
+
+                    # Find tracked user
+                    stmt_user = select(User).where(User.id == d.user_id)
+                    res_user = await db.execute(stmt_user)
+                    tracked_user = res_user.scalar_one_or_none()
+                    if not tracked_user:
+                        continue
+
+                    # Determine recipients based on active circle memberships
+                    stmt_circles = select(CircleMember.circle_id).where(CircleMember.user_id == d.user_id)
+                    res_circles = await db.execute(stmt_circles)
+                    circle_ids = res_circles.scalars().all()
+
+                    for circle_id in circle_ids:
+                        stmt_members = select(User).join(CircleMember).where(CircleMember.circle_id == circle_id)
+                        res_members = await db.execute(stmt_members)
+                        members = res_members.scalars().all()
+
+                        for m in members:
+                            if m.id == d.user_id:
+                                continue
+
+                            # Check recipient's notify_device_offline preference
+                            if not getattr(m, "notify_device_offline", True):
+                                continue
+
+                            title = f"Device offline: {tracked_user.display_name}"
+                            message = f"{tracked_user.display_name}'s {d.device_name} has gone offline."
+
+                            await AlertService.create_alert(
+                                db=db,
+                                alert_in=AlertCreate(
+                                    circle_id=circle_id,
+                                    user_id=m.id,
+                                    target_user_id=tracked_user.id,
+                                    alert_type="device_offline",
+                                    title=title,
+                                    message=message
+                                )
+                            )
+
+

@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     AUTH_CODE_EXPIRE_SECONDS: int = 300
     BASE_URL: str = ""
     UPLOADS_DIR: str = ""
+    DEVICE_OFFLINE_THRESHOLD_MINUTES: int = 15
 
     class Config:
         env_file = ".env"

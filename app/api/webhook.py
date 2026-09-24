@@ -51,6 +51,11 @@ async def handle_webhook(
         try:
             sensor_data = SensorRegistrationData(**req_data)
             res = await TelemetryService.process_sensor_registration(db, device, sensor_data)
+            from datetime import datetime, timezone
+            device.last_seen_at = datetime.now(timezone.utc)
+            device.first_telemetry_received = True
+            device.device_offline_alert_triggered = False
+            await db.commit()
             return res
         except Exception as e:
             logger.error(f"Failed to process sensor registration: {e}")
@@ -63,6 +68,11 @@ async def handle_webhook(
             
             updates = [SensorStateUpdate(**item) for item in req_data]
             res = await TelemetryService.process_sensor_state_updates(db, device, updates)
+            from datetime import datetime, timezone
+            device.last_seen_at = datetime.now(timezone.utc)
+            device.first_telemetry_received = True
+            device.device_offline_alert_triggered = False
+            await db.commit()
             return res
         except Exception as e:
             logger.error(f"Failed to process sensor updates: {e}")

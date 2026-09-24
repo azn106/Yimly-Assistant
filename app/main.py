@@ -115,8 +115,53 @@ async def on_startup() -> None:
                 except Exception:
                     # Column likely already exists, ignore
                     pass
+
+            # Dynamically migrate Device low_battery_alert_triggered
+            try:
+                await conn.execute(text("ALTER TABLE devices ADD COLUMN low_battery_alert_triggered BOOLEAN DEFAULT 0;"))
+                logger.info("Database migration: Added low_battery_alert_triggered column to devices table.")
+            except Exception:
+                pass
+
+            # Dynamically migrate Device last_known_battery
+            try:
+                await conn.execute(text("ALTER TABLE devices ADD COLUMN last_known_battery FLOAT;"))
+                logger.info("Database migration: Added last_known_battery column to devices table.")
+            except Exception:
+                pass
+
+            # Dynamically migrate Device device_offline_alert_triggered
+            try:
+                await conn.execute(text("ALTER TABLE devices ADD COLUMN device_offline_alert_triggered BOOLEAN DEFAULT 0;"))
+                logger.info("Database migration: Added device_offline_alert_triggered column to devices table.")
+            except Exception:
+                pass
+
+            # Dynamically migrate Device first_telemetry_received
+            try:
+                await conn.execute(text("ALTER TABLE devices ADD COLUMN first_telemetry_received BOOLEAN DEFAULT 0;"))
+                logger.info("Database migration: Added first_telemetry_received column to devices table.")
+            except Exception:
+                pass
                 
         logger.info("Database schemas created/verified successfully.")
+
+        # Start background device offline checker
+        import asyncio
+        async def run_offline_checker():
+            from app.db.database import async_session_maker
+            from app.services.telemetry_service import TelemetryService
+            logger.info("Background device offline checker task started.")
+            while True:
+                try:
+                    async with async_session_maker() as session:
+                        await TelemetryService.check_offline_devices(session)
+                except Exception as ex:
+                    logger.error(f"Error in offline devices checker task: {ex}")
+                await asyncio.sleep(5) # Check frequently
+
+        asyncio.create_task(run_offline_checker())
+
     except Exception as e:
         logger.critical(f"Database schema initialization failed: {e}")
         raise e

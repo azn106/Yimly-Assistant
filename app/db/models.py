@@ -89,6 +89,10 @@ class Device(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    low_battery_alert_triggered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_known_battery: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    device_offline_alert_triggered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    first_telemetry_received: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     user: Mapped["User"] = relationship("User", back_populates="devices")
     entities: Mapped[List["EntityState"]] = relationship("EntityState", back_populates="device", cascade="all, delete-orphan")
