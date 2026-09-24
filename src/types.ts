@@ -64,6 +64,19 @@ export interface Circle {
   created_at: string;
 }
 
+export interface Place {
+  id: number;
+  circle_id: number;
+  name: string;
+  address?: string | null;
+  latitude: number;
+  longitude: number;
+  radius: number;
+  icon?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface LocationHistoryItem {
   id: string;
   entity_id: string;
@@ -77,3 +90,18 @@ export interface LocationHistoryItem {
   battery_level?: number | string | null;
   timestamp: string;
 }
+
+export type AlertType = "arrival" | "departure" | "stop_sharing" | "low_battery" | "device_offline";
+
+export interface Alert {
+  id: number;
+  circle_id: number;
+  user_id: number;
+  target_user_id?: number | null;
+  alert_type: AlertType;
+  title: string;
+  message: string;
+  read: boolean;
+  created_at: string;
+}
+

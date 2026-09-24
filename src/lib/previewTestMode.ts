@@ -1,4 +1,5 @@
 import { CircleMember, MemberDeviceLocation, UserInfo } from "../types";
+import { getAvatarColor } from "./avatarColor";
 
 // Detect if running in development or AI Studio Preview environment
 export function isDevOrPreviewEnvironment(): boolean {
@@ -93,7 +94,7 @@ export function processPreviewTestMembers(
   const nowIso = new Date().toISOString();
   const ownerId = currentUser?.id || 1;
   const ownerName = currentUser?.display_name || "Test Owner";
-  const ownerColor = currentUser?.avatar_color || "#4f46e5";
+  const ownerColor = getAvatarColor(currentUser?.avatar_color);
   const ownerPhoto = currentUser?.profile_picture_url || null;
 
   // Build simulated owner devices list with selected default device at index 0
@@ -127,7 +128,7 @@ export function processPreviewTestMembers(
         id: SIMULATED_ALEX_MEMBER.id,
         username: SIMULATED_ALEX_MEMBER.username,
         display_name: SIMULATED_ALEX_MEMBER.display_name,
-        avatar_color: SIMULATED_ALEX_MEMBER.avatar_color || "#10b981"
+        avatar_color: getAvatarColor(SIMULATED_ALEX_MEMBER.avatar_color)
       };
 
   // If viewing as Alex (other member):

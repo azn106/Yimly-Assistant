@@ -262,8 +262,8 @@ async def api_login(login_in: LoginRequest, db: AsyncSession = Depends(get_db)):
             "avatar_color": user.avatar_color,
             "profile_picture_url": user.profile_picture_url,
             "map_style": user.map_style or "osm",
-            "map_selected_icon_size": user.map_selected_icon_size or 48,
-            "map_unselected_icon_size": user.map_unselected_icon_size or 36,
+            "map_selected_icon_size": user.map_selected_icon_size or 72,
+            "map_unselected_icon_size": user.map_unselected_icon_size or 64,
             "share_location": user.share_location if user.share_location is not None else True,
             "save_location_history": user.save_location_history if user.save_location_history is not None else True,
             "history_retention": user.history_retention or "30d",
@@ -290,12 +290,18 @@ async def update_profile(
     current_user: User = Depends(require_authenticated_user),
     db: AsyncSession = Depends(get_db)
 ):
+    previous_share = current_user.share_location if current_user.share_location is not None else True
+    is_stop_sharing_transition = False
+
     if profile_in.avatar_color is not None:
         current_user.avatar_color = profile_in.avatar_color
     if profile_in.display_name is not None:
         current_user.display_name = profile_in.display_name
     if profile_in.share_location is not None:
-        current_user.share_location = bool(profile_in.share_location)
+        next_share = bool(profile_in.share_location)
+        if previous_share is True and next_share is False:
+            is_stop_sharing_transition = True
+        current_user.share_location = next_share
     if profile_in.save_location_history is not None:
         current_user.save_location_history = bool(profile_in.save_location_history)
     if profile_in.history_retention is not None:
@@ -354,6 +360,42 @@ async def update_profile(
     db.add(current_user)
     await db.commit()
     await db.refresh(current_user)
+
+    if is_stop_sharing_transition:
+        from app.db.models import CircleMember, User as UserModel
+        from app.schemas.alerts import AlertCreate
+        from app.services.alert_service import AlertService
+
+        stmt_circle = select(CircleMember.circle_id).where(CircleMember.user_id == current_user.id)
+        res_circle = await db.execute(stmt_circle)
+        circle_ids = res_circle.scalars().all()
+
+        for circle_id in circle_ids:
+            stmt_members = select(UserModel).join(CircleMember).where(CircleMember.circle_id == circle_id)
+            res_members = await db.execute(stmt_members)
+            members = res_members.scalars().all()
+
+            for m in members:
+                if m.id == current_user.id:
+                    continue
+
+                if not getattr(m, "notify_stop_sharing", True):
+                    continue
+
+                title = f"{current_user.display_name} stopped sharing location"
+                message = f"{current_user.display_name} has stopped sharing their location with the circle."
+
+                await AlertService.create_alert(
+                    db=db,
+                    alert_in=AlertCreate(
+                        circle_id=circle_id,
+                        user_id=m.id,
+                        target_user_id=current_user.id,
+                        alert_type="stop_sharing",
+                        title=title,
+                        message=message
+                    )
+                )
 
     if profile_in.history_retention is not None:
         await cleanup_history_for_user(db, current_user.id, current_user.history_retention)

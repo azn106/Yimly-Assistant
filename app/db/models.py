@@ -16,8 +16,8 @@ class User(Base):
     avatar_color: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     profile_picture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     map_style: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default="osm")
-    map_selected_icon_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=48)
-    map_unselected_icon_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=36)
+    map_selected_icon_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=72)
+    map_unselected_icon_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=64)
     share_location: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     save_location_history: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     history_retention: Mapped[str] = mapped_column(String(20), default="30d", nullable=False)
@@ -185,6 +185,8 @@ class Circle(Base):
 
     owner: Mapped["User"] = relationship("User", foreign_keys=[owner_id])
     members: Mapped[List["CircleMember"]] = relationship("CircleMember", back_populates="circle", cascade="all, delete-orphan")
+    places: Mapped[List["Place"]] = relationship("Place", back_populates="circle", cascade="all, delete-orphan")
+    alerts: Mapped[List["Alert"]] = relationship("Alert", back_populates="circle", cascade="all, delete-orphan")
 
 
 class CircleMember(Base):
@@ -197,4 +199,60 @@ class CircleMember(Base):
 
     circle: Mapped["Circle"] = relationship("Circle", back_populates="members")
     user: Mapped["User"] = relationship("User")
+
+
+class Place(Base):
+    __tablename__ = "places"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    circle_id: Mapped[int] = mapped_column(Integer, ForeignKey("circles.id", ondelete="CASCADE"), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    address: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    latitude: Mapped[float] = mapped_column(Float, nullable=False)
+    longitude: Mapped[float] = mapped_column(Float, nullable=False)
+    radius: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
+    icon: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    circle: Mapped["Circle"] = relationship("Circle", back_populates="places")
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    circle_id: Mapped[int] = mapped_column(Integer, ForeignKey("circles.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    target_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True)
+    alert_type: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    read: Mapped[bool] = mapped_column(Boolean, default=False, index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True, nullable=False)
+
+    circle: Mapped["Circle"] = relationship("Circle", back_populates="alerts")
+    user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+    target_user: Mapped[Optional["User"]] = relationship("User", foreign_keys=[target_user_id])
+
+    __table_args__ = (
+        Index("idx_alerts_circle_user_created", "circle_id", "user_id", "created_at"),
+    )
+
+
+class GeofenceState(Base):
+    __tablename__ = "geofence_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    device_id: Mapped[int] = mapped_column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), index=True, nullable=False)
+    place_id: Mapped[int] = mapped_column(Integer, ForeignKey("places.id", ondelete="CASCADE"), index=True, nullable=False)
+    inside: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_updated: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        Index("idx_geofence_user_dev_place", "user_id", "device_id", "place_id", unique=True),
+    )
+
+
 

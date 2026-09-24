@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo, useImperativeHandle } from "react";
 import { motion, useMotionValue, animate } from "motion/react";
 import * as maplibregl from "maplibre-gl";
-import { CircleMember, LocationHistoryItem, UserInfo, MemberDeviceLocation } from "../types";
+import { CircleMember, LocationHistoryItem, UserInfo, MemberDeviceLocation, Place } from "../types";
 import { getMapStyle } from "../lib/mapStyles";
-import { renderMarkerHTML, renderPrivateDeviceMarkerHTML, getMarkerDimensions, getClusterScale, getBalloonOffsets, calculateDistanceMeters, StackedMemberInfo } from "../lib/markerRenderer";
+import { renderMarkerHTML, renderPrivateDeviceMarkerHTML, getMarkerDimensions, getClusterScale, getBalloonOffsets, calculateDistanceMeters, StackedMemberInfo, renderPlaceMarkerHTML, getPlaceIconSVGString, escapeHtml } from "../lib/markerRenderer";
+import { getAvatarColor, DEFAULT_AVATAR_COLOR } from "../lib/avatarColor";
 import { DeviceIcon } from "./DeviceIcon";
 import { 
   MapPin, 
@@ -168,6 +169,7 @@ function getCoordsFromPerimeter(s: number, minX: number, maxX: number, minY: num
 
 export interface MapComponentProps {
   members: CircleMember[];
+  places?: Place[];
   currentUser?: UserInfo | null;
   onRefresh: () => void;
   loading: boolean;
@@ -241,8 +243,8 @@ function formatCustomRangeLabel(startStr: string, endStr: string): string {
  * Strictly preserves the exact same color family (hue) throughout the entire journey.
  */
 function getRouteGradientColor(hexColor?: string | null, progress: number = 1.0): string {
-  if (!hexColor || !hexColor.startsWith("#")) return "#3730a3";
-  let hex = hexColor.replace("#", "");
+  const safeHex = getAvatarColor(hexColor);
+  let hex = safeHex.replace("#", "");
   if (hex.length === 3) {
     hex = hex.split("").map((c) => c + c).join("");
   }
@@ -329,8 +331,55 @@ function calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: num
   return R * c;
 }
 
+function isValidPlace(place: any): place is Place {
+  if (!place || typeof place !== "object") return false;
+  if (typeof place.latitude !== "number" || isNaN(place.latitude) || place.latitude < -90 || place.latitude > 90) return false;
+  if (typeof place.longitude !== "number" || isNaN(place.longitude) || place.longitude < -180 || place.longitude > 180) return false;
+  if (typeof place.radius !== "number" || isNaN(place.radius) || place.radius <= 0) return false;
+  return true;
+}
+
+function createGeoJSONCircle(
+  center: [number, number],
+  radiusInMeters: number,
+  points = 64,
+  properties: Record<string, any> = {}
+): GeoJSON.Feature<GeoJSON.Polygon> {
+  const lng1 = (center[0] * Math.PI) / 180;
+  const lat1 = (center[1] * Math.PI) / 180;
+  const R = 6371000.0; // Earth radius in meters
+  const d = radiusInMeters / R; // angular distance in radians
+
+  const coordinates: [number, number][] = [];
+
+  for (let i = 0; i <= points; i++) {
+    const bearing = (i * 2 * Math.PI) / points;
+    const lat2 = Math.asin(
+      Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(bearing)
+    );
+    const lng2 =
+      lng1 +
+      Math.atan2(
+        Math.sin(bearing) * Math.sin(d) * Math.cos(lat1),
+        Math.cos(d) - Math.sin(lat1) * Math.sin(lat2)
+      );
+
+    coordinates.push([(lng2 * 180) / Math.PI, (lat2 * 180) / Math.PI]);
+  }
+
+  return {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [coordinates]
+    },
+    properties
+  };
+}
+
 export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentProps>(function MapComponent({ 
   members, 
+  places,
   currentUser,
   onRefresh, 
   loading, 
@@ -347,6 +396,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
   const markersRef = useRef<{ [key: string]: maplibregl.Marker }>({});
   const cardContainerRef = useRef<HTMLDivElement>(null);
   const currentTargetCoordRef = useRef<[number, number] | null>(null);
+  const activePlacePopupRef = useRef<maplibregl.Popup | null>(null);
 
   const [internalSelectedMemberId, setInternalSelectedMemberId] = useState<number | null>(null);
   const isControlled = propSelectedMemberId !== undefined;
@@ -1681,8 +1731,8 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
       const isClusterPrimary = clusters.length === 1 || cIdx === closestClusterIndex;
       const activePinType = mapPinType || "classic_pin";
 
-      const unselBase = typeof unselectedIconSize === "number" && unselectedIconSize > 0 ? unselectedIconSize : 36;
-      const selBase = typeof selectedIconSize === "number" && selectedIconSize > 0 ? selectedIconSize : 48;
+      const unselBase = typeof unselectedIconSize === "number" && unselectedIconSize > 0 ? unselectedIconSize : 64;
+      const selBase = typeof selectedIconSize === "number" && selectedIconSize > 0 ? selectedIconSize : 72;
 
       const stackedMembers: StackedMemberInfo[] = cluster.members.map((m) => {
         const pDev = m.devices?.[0];
@@ -1691,7 +1741,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
         return {
           id: m.id,
           memberName: m.display_name,
-          baseColor: m.avatar_color || "#4f46e5",
+          baseColor: getAvatarColor(m.avatar_color),
           photoUrl: m.profile_picture_url || null,
           deviceIcon: devIcon,
           batteryLevel: batt
@@ -1753,13 +1803,13 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
           handleFocusMember(freshMember);
         };
 
-        const baseColor = member.avatar_color || "#4f46e5";
+        const baseColor = getAvatarColor(member.avatar_color);
         const deviceIcon = primaryDevice.map_icon ? primaryDevice.map_icon.split(" ")[0] : "📱";
         const batteryVal = primaryDevice.battery !== undefined && primaryDevice.battery !== null ? primaryDevice.battery : null;
         const photoUrl = member.profile_picture_url || "";
         const memberName = member.display_name;
 
-        const stackFingerprint = cluster.members.map((m) => `${m.id}_${m.avatar_color}_${m.profile_picture_url || ""}`).join("|");
+        const stackFingerprint = cluster.members.map((m) => `${m.id}_${getAvatarColor(m.avatar_color)}_${m.profile_picture_url || ""}`).join("|");
         const renderKey = `${markerKey}_${activePinType}_${isSelected}_${dims.width}_${dims.height}_${baseColor}_${photoUrl}_${memberName}_${deviceIcon}_${batteryVal}_${isClusterPrimary}_${stackFingerprint}`;
 
         if (el.dataset.renderKey !== renderKey) {
@@ -1785,7 +1835,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     const loggedInOwner = membersWithLocation.find((m) => currentUser && m.id === currentUser.id);
     if (loggedInOwner && loggedInOwner.devices && loggedInOwner.devices.length > 1) {
       const privateDevices = loggedInOwner.devices.slice(1);
-      const ownerColor = loggedInOwner.avatar_color || "#4f46e5";
+      const ownerColor = getAvatarColor(loggedInOwner.avatar_color);
 
       privateDevices.forEach((dev) => {
         if (dev.longitude === null || dev.latitude === null || dev.longitude === undefined || dev.latitude === undefined) return;
@@ -1875,6 +1925,177 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     }
   }, [membersWithLocation, selectedMemberId, selectedIconSize, unselectedIconSize, handleFocusMember, mapPinType, indicatorTrigger]);
 
+  // Update Places Markers & Geofence Circles
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    // Filter valid places according to safety rules
+    const validPlaces = (places || []).filter(isValidPlace);
+
+    const openPlacePopup = (place: Place) => {
+      if (activePlacePopupRef.current) {
+        activePlacePopupRef.current.remove();
+        activePlacePopupRef.current = null;
+      }
+
+      const svgContent = getPlaceIconSVGString(place.icon);
+
+      const popupContent = `
+        <div class="p-3 bg-slate-900/95 backdrop-blur-xl text-white rounded-2xl shadow-2xl border border-slate-700/80 min-w-[200px] font-sans">
+          <div class="flex items-center gap-2.5 mb-2 pb-2 border-b border-slate-800">
+            <div class="w-8 h-8 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center shrink-0 border border-indigo-500/30">
+              <svg class="w-4.5 h-4.5 stroke-current fill-none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                ${svgContent}
+              </svg>
+            </div>
+            <div class="font-extrabold text-sm text-slate-100 truncate">${escapeHtml(place.name)}</div>
+          </div>
+          ${
+            place.address
+              ? `<div class="text-xs text-slate-300 mb-2 flex items-start gap-1.5"><span class="shrink-0 text-indigo-400">📍</span><span class="leading-tight">${escapeHtml(
+                  place.address
+                )}</span></div>`
+              : ""
+          }
+          <div class="text-[11px] font-bold text-indigo-300 flex items-center gap-1.5 bg-indigo-950/80 px-2.5 py-1 rounded-lg border border-indigo-800/50 w-fit">
+            <span class="text-indigo-400">⭕</span>
+            <span>Geofence:</span>
+            <span class="text-white">${
+              place.radius >= 1000 ? (place.radius / 1000).toFixed(1) + " km" : place.radius + " m"
+            }</span>
+          </div>
+        </div>
+      `;
+
+      const popup = new maplibregl.Popup({
+        closeButton: true,
+        closeOnClick: true,
+        className: "custom-place-popup",
+        offset: [0, -10]
+      })
+        .setLngLat([place.longitude, place.latitude])
+        .setHTML(popupContent)
+        .addTo(map);
+
+      activePlacePopupRef.current = popup;
+    };
+
+    // 1. Update GeoJSON source & layers for geofence circles
+    const circleFeatures = validPlaces.map((place) =>
+      createGeoJSONCircle([place.longitude, place.latitude], place.radius, 64, {
+        id: place.id,
+        name: place.name
+      })
+    );
+
+    const geojson: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features: circleFeatures
+    };
+
+    const syncCircleSourceAndLayers = () => {
+      try {
+        const source = map.getSource("places-geofence-source") as maplibregl.GeoJSONSource;
+        if (source) {
+          source.setData(geojson);
+        } else {
+          map.addSource("places-geofence-source", {
+            type: "geojson",
+            data: geojson
+          });
+
+          // Fill layer
+          map.addLayer({
+            id: "places-geofence-fill",
+            type: "fill",
+            source: "places-geofence-source",
+            paint: {
+              "fill-color": "#6366f1",
+              "fill-opacity": 0.15
+            }
+          });
+
+          // Outline stroke layer
+          map.addLayer({
+            id: "places-geofence-stroke",
+            type: "line",
+            source: "places-geofence-source",
+            paint: {
+              "line-color": "#4f46e5",
+              "line-width": 2,
+              "line-dasharray": [2, 2],
+              "line-opacity": 0.7
+            }
+          });
+        }
+      } catch (err) {
+        console.warn("Places geofence layer update deferred until style ready:", err);
+      }
+    };
+
+    if (map.isStyleLoaded()) {
+      syncCircleSourceAndLayers();
+    } else {
+      map.once("styledata", syncCircleSourceAndLayers);
+    }
+
+    // 2. Sync Place DOM Markers
+    const currentPlaceMarkerKeys = new Set<string>();
+
+    validPlaces.forEach((place) => {
+      const markerKey = `place_${place.id}`;
+      currentPlaceMarkerKeys.add(markerKey);
+
+      let marker = markersRef.current[markerKey];
+
+      if (!marker) {
+        const el = document.createElement("div");
+        el.className = "custom-place-marker cursor-pointer select-none";
+        el.style.zIndex = "45"; // below member markers (60-100)
+
+        marker = new maplibregl.Marker({
+          element: el,
+          anchor: "center",
+          offset: [0, 0]
+        })
+          .setLngLat([place.longitude, place.latitude])
+          .addTo(map);
+
+        markersRef.current[markerKey] = marker;
+      } else {
+        marker.setLngLat([place.longitude, place.latitude]);
+      }
+
+      const el = marker.getElement();
+      el.style.zIndex = "45";
+
+      el.onclick = (e) => {
+        e.stopPropagation();
+        openPlacePopup(place);
+      };
+
+      const renderKey = `${markerKey}_${place.name}_${place.icon || "map-pin"}_${place.latitude}_${place.longitude}_${place.radius}_${place.address || ""}`;
+
+      if (el.dataset.renderKey !== renderKey) {
+        el.dataset.renderKey = renderKey;
+        el.innerHTML = renderPlaceMarkerHTML({
+          name: place.name,
+          icon: place.icon,
+          radius: place.radius
+        });
+      }
+    });
+
+    // 3. Remove markers for deleted/removed places
+    Object.keys(markersRef.current).forEach((key) => {
+      if (key.startsWith("place_") && !currentPlaceMarkerKeys.has(key)) {
+        markersRef.current[key].remove();
+        delete markersRef.current[key];
+      }
+    });
+  }, [places, mapStyle]);
+
   const renderOffScreenIndicators = () => {
     const map = mapRef.current;
     if (!map) return null;
@@ -1951,7 +2172,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
         const angleRad = Math.atan2(py - cy, px - cx);
         const angleDeg = (angleRad * 180) / Math.PI;
 
-        const baseColor = member.avatar_color || "#4f46e5";
+        const baseColor = getAvatarColor(member.avatar_color);
         const batteryVal = primaryDevice.battery !== undefined && primaryDevice.battery !== null ? primaryDevice.battery : null;
 
         // Map intersection coordinate onto continuous 1D perimeter
@@ -2206,7 +2427,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
             {/* Member Pills with Saved Avatar Colors (Icon/Avatar Only) */}
             {membersWithLocation.map((member) => {
               const isSelected = selectedMemberId === member.id;
-              const memberColor = member.avatar_color || "#4f46e5";
+              const memberColor = getAvatarColor(member.avatar_color);
 
               return (
                 <button
@@ -2521,9 +2742,9 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                   <div
                     className="w-9 h-9 text-white font-black text-xs flex items-center justify-center select-none overflow-hidden shrink-0"
                     style={{
-                      backgroundColor: selectedMember.avatar_color || "#4f46e5",
+                      backgroundColor: getAvatarColor(selectedMember.avatar_color),
                       clipPath: "url(#squircle-clip-app)",
-                      filter: `drop-shadow(0 2px 4px ${selectedMember.avatar_color || '#4f46e5'}40)`
+                      filter: `drop-shadow(0 2px 4px ${getAvatarColor(selectedMember.avatar_color)}40)`
                     }}
                   >
                     {selectedMember.profile_picture_url ? (

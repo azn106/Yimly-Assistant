@@ -60,12 +60,12 @@ export function formatUserResponse(u: UserData) {
     id: u.id,
     username: u.username,
     display_name: u.display_name,
-    avatar_color: u.avatar_color || "#E2D9F3",
+    avatar_color: u.avatar_color || null,
     profile_picture_url: u.profile_picture_url || null,
     map_style: u.map_style || "osm",
     map_pin_type: u.map_pin_type || "classic_pin",
-    map_selected_icon_size: u.map_selected_icon_size || 48,
-    map_unselected_icon_size: u.map_unselected_icon_size || 36,
+    map_selected_icon_size: u.map_selected_icon_size || 72,
+    map_unselected_icon_size: u.map_unselected_icon_size || 64,
     share_location: u.share_location !== false,
     save_location_history: u.save_location_history !== false,
     history_retention: u.history_retention || "30d",
@@ -128,13 +128,51 @@ export interface LocationHistoryEntry {
   timestamp: string;
 }
 
+export interface PlaceData {
+  id: number;
+  circle_id: number;
+  name: string;
+  address?: string | null;
+  latitude: number;
+  longitude: number;
+  radius: number;
+  icon?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AlertData {
+  id: number;
+  circle_id: number;
+  user_id: number;
+  target_user_id?: number | null;
+  alert_type: string;
+  title: string;
+  message: string;
+  read: boolean;
+  created_at: string;
+}
+
+export interface GeofenceStateData {
+  id: number;
+  user_id: number;
+  device_id: string;
+  place_id: number;
+  inside: boolean;
+  last_updated: string;
+}
+
 export interface YimlyPreviewDatabase {
   users: UserData[];
   circles: CircleData[];
   circle_members: CircleMemberData[];
   entity_states: EntityStateData[];
   location_history: LocationHistoryEntry[];
+  places: PlaceData[];
+  alerts: AlertData[];
+  geofence_states: GeofenceStateData[];
 }
+
 
 // Helper to build deterministic Preview-only historical location points
 function getDeterministicPreviewHistory(): LocationHistoryEntry[] {
@@ -431,7 +469,10 @@ function loadDB(): YimlyPreviewDatabase {
           last_updated: new Date().toISOString()
         }
       ],
-      location_history: getDeterministicPreviewHistory()
+      location_history: getDeterministicPreviewHistory(),
+      places: [],
+      alerts: [],
+      geofence_states: []
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(initialDB, null, 2));
     return initialDB;
@@ -448,7 +489,10 @@ function loadDB(): YimlyPreviewDatabase {
       circles: parsed.circles || [],
       circle_members: parsed.circle_members || [],
       entity_states: parsed.entity_states || [],
-      location_history: existingHistory
+      location_history: existingHistory,
+      places: parsed.places || [],
+      alerts: parsed.alerts || [],
+      geofence_states: parsed.geofence_states || []
     };
 
     // If loaded history was empty or upgraded, persist it
@@ -463,7 +507,10 @@ function loadDB(): YimlyPreviewDatabase {
       circles: [],
       circle_members: [],
       entity_states: [],
-      location_history: getDeterministicPreviewHistory()
+      location_history: getDeterministicPreviewHistory(),
+      places: [],
+      alerts: [],
+      geofence_states: []
     };
   }
 }
@@ -610,7 +657,7 @@ app.post("/api/setup/register", (req, res) => {
     username,
     password_hash,
     display_name,
-    avatar_color: "#E2D9F3",
+    avatar_color: null,
     created_at: new Date().toISOString()
   };
 
@@ -639,8 +686,8 @@ app.post("/api/setup/register", (req, res) => {
       username: newUser.username,
       display_name: newUser.display_name,
       avatar_color: newUser.avatar_color,
-      map_selected_icon_size: 48,
-      map_unselected_icon_size: 36
+      map_selected_icon_size: 72,
+      map_unselected_icon_size: 64
     }
   });
 });
@@ -664,10 +711,10 @@ app.post("/api/auth/register", (req, res) => {
     username,
     password_hash,
     display_name,
-    avatar_color: "#E2D9F3",
+    avatar_color: null,
     map_style: "osm",
-    map_selected_icon_size: 48,
-    map_unselected_icon_size: 36,
+    map_selected_icon_size: 72,
+    map_unselected_icon_size: 64,
     created_at: new Date().toISOString()
   };
 
@@ -837,8 +884,15 @@ app.put("/api/auth/profile", authenticateToken, (req: AuthRequest, res) => {
     db.users[userIdx].map_unselected_icon_size = Math.max(24, Math.min(72, map_unselected_icon_size));
   }
 
+  const previousShare = db.users[userIdx].share_location !== false;
+  let isStopSharingTransition = false;
+
   if (share_location !== undefined) {
-    db.users[userIdx].share_location = Boolean(share_location);
+    const nextShare = Boolean(share_location);
+    if (previousShare === true && nextShare === false) {
+      isStopSharingTransition = true;
+    }
+    db.users[userIdx].share_location = nextShare;
   }
   if (save_location_history !== undefined) {
     db.users[userIdx].save_location_history = Boolean(save_location_history);
@@ -856,6 +910,39 @@ app.put("/api/auth/profile", authenticateToken, (req: AuthRequest, res) => {
   if (notify_stop_sharing !== undefined) db.users[userIdx].notify_stop_sharing = Boolean(notify_stop_sharing);
   if (notify_low_battery !== undefined) db.users[userIdx].notify_low_battery = Boolean(notify_low_battery);
   if (notify_device_offline !== undefined) db.users[userIdx].notify_device_offline = Boolean(notify_device_offline);
+
+  if (isStopSharingTransition) {
+    const userCircles = db.circle_members.filter((m) => m.user_id === req.user!.id).map((m) => m.circle_id);
+    for (const circleId of userCircles) {
+      const circleMembers = db.circle_members.filter((m) => m.circle_id === circleId);
+      for (const cm of circleMembers) {
+        if (cm.user_id === req.user!.id) continue;
+
+        const recipient = db.users.find((u) => u.id === cm.user_id);
+        if (!recipient || recipient.notify_stop_sharing === false) continue;
+
+        const newAlert: AlertData = {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          circle_id: circleId,
+          user_id: cm.user_id,
+          target_user_id: req.user!.id,
+          alert_type: "stop_sharing",
+          title: `${db.users[userIdx].display_name} stopped sharing location`,
+          message: `${db.users[userIdx].display_name} has stopped sharing their location with the circle.`,
+          read: false,
+          created_at: new Date().toISOString()
+        };
+
+        db.alerts = db.alerts || [];
+        db.alerts.push(newAlert);
+
+        broadcastStateUpdate({
+          event_type: "alert_created",
+          data: newAlert
+        });
+      }
+    }
+  }
 
   saveDB(db);
   res.json(formatUserResponse(db.users[userIdx]));
@@ -1049,6 +1136,7 @@ app.delete("/api/circles/:id", authenticateToken, (req: AuthRequest, res) => {
 
   db.circles = db.circles.filter((c) => c.id !== circleId);
   db.circle_members = db.circle_members.filter((m) => m.circle_id !== circleId);
+  db.places = (db.places || []).filter((p) => p.circle_id !== circleId);
   saveDB(db);
 
   res.json({
@@ -1068,6 +1156,7 @@ app.post("/api/circles/:id/delete", authenticateToken, (req: AuthRequest, res) =
 
   db.circles = db.circles.filter((c) => c.id !== circleId);
   db.circle_members = db.circle_members.filter((m) => m.circle_id !== circleId);
+  db.places = (db.places || []).filter((p) => p.circle_id !== circleId);
   saveDB(db);
 
   res.json({
@@ -1104,7 +1193,7 @@ app.get("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) =
           id: member.id,
           username: member.username,
           display_name: member.display_name,
-          avatar_color: member.avatar_color || "#E2D9F3",
+          avatar_color: member.avatar_color || null,
           profile_picture_url: member.profile_picture_url || null,
           devices: []
         };
@@ -1143,7 +1232,7 @@ app.get("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) =
         id: member.id,
         username: member.username,
         display_name: member.display_name,
-        avatar_color: member.avatar_color || "#E2D9F3",
+        avatar_color: member.avatar_color || null,
         profile_picture_url: member.profile_picture_url || null,
         devices
       };
@@ -1151,6 +1240,263 @@ app.get("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) =
 
   res.json(members);
 });
+
+// Places API Endpoints
+app.get("/api/circles/:circleId/places", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.circleId);
+  db = loadDB();
+  const userId = req.user!.id;
+
+  const isMember = db.circle_members.some((m) => m.circle_id === circleId && m.user_id === userId);
+  if (!isMember) {
+    return res.status(403).json({ detail: "Access denied: You are not a member of this circle" });
+  }
+
+  const circlePlaces = (db.places || []).filter((p) => p.circle_id === circleId);
+  res.json(circlePlaces);
+});
+
+app.post("/api/circles/:circleId/places", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.circleId);
+  db = loadDB();
+  const userId = req.user!.id;
+
+  const isMember = db.circle_members.some((m) => m.circle_id === circleId && m.user_id === userId);
+  if (!isMember) {
+    return res.status(403).json({ detail: "Access denied: You are not a member of this circle" });
+  }
+
+  const { name, address, latitude, longitude, radius, icon } = req.body || {};
+
+  if (!name || typeof name !== "string" || !name.trim()) {
+    return res.status(422).json({ detail: "Name is required" });
+  }
+
+  const latNum = Number(latitude);
+  const lngNum = Number(longitude);
+  const radNum = radius !== undefined ? Number(radius) : 100.0;
+
+  if (isNaN(latNum) || latNum < -90 || latNum > 90) {
+    return res.status(422).json({ detail: "Latitude must be between -90 and 90 degrees." });
+  }
+
+  if (isNaN(lngNum) || lngNum < -180 || lngNum > 180) {
+    return res.status(422).json({ detail: "Longitude must be between -180 and 180 degrees." });
+  }
+
+  if (isNaN(radNum) || radNum <= 0 || radNum > 100000) {
+    return res.status(422).json({ detail: "Radius must be greater than 0 and up to 100,000 meters." });
+  }
+
+  const nowIso = new Date().toISOString();
+  const newPlace: PlaceData = {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    circle_id: circleId,
+    name: name.trim(),
+    address: address ? String(address).trim() : null,
+    latitude: latNum,
+    longitude: lngNum,
+    radius: radNum,
+    icon: icon ? String(icon).trim() : null,
+    created_at: nowIso,
+    updated_at: nowIso
+  };
+
+  db.places = db.places || [];
+  db.places.push(newPlace);
+  saveDB(db);
+
+  res.status(201).json(newPlace);
+});
+
+app.get("/api/circles/:circleId/places/:placeId", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.circleId);
+  const placeId = Number(req.params.placeId);
+  db = loadDB();
+  const userId = req.user!.id;
+
+  const isMember = db.circle_members.some((m) => m.circle_id === circleId && m.user_id === userId);
+  if (!isMember) {
+    return res.status(403).json({ detail: "Access denied: You are not a member of this circle" });
+  }
+
+  const place = (db.places || []).find((p) => p.id === placeId && p.circle_id === circleId);
+  if (!place) {
+    return res.status(404).json({ detail: "Place not found in this circle" });
+  }
+
+  res.json(place);
+});
+
+app.put("/api/circles/:circleId/places/:placeId", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.circleId);
+  const placeId = Number(req.params.placeId);
+  db = loadDB();
+  const userId = req.user!.id;
+
+  const isMember = db.circle_members.some((m) => m.circle_id === circleId && m.user_id === userId);
+  if (!isMember) {
+    return res.status(403).json({ detail: "Access denied: You are not a member of this circle" });
+  }
+
+  const place = (db.places || []).find((p) => p.id === placeId && p.circle_id === circleId);
+  if (!place) {
+    return res.status(404).json({ detail: "Place not found in this circle" });
+  }
+
+  const { name, address, latitude, longitude, radius, icon } = req.body || {};
+
+  if (name !== undefined) {
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(422).json({ detail: "Name cannot be empty" });
+    }
+    place.name = name.trim();
+  }
+
+  if (address !== undefined) {
+    place.address = address ? String(address).trim() : null;
+  }
+
+  if (latitude !== undefined) {
+    const latNum = Number(latitude);
+    if (isNaN(latNum) || latNum < -90 || latNum > 90) {
+      return res.status(422).json({ detail: "Latitude must be between -90 and 90 degrees." });
+    }
+    place.latitude = latNum;
+  }
+
+  if (longitude !== undefined) {
+    const lngNum = Number(longitude);
+    if (isNaN(lngNum) || lngNum < -180 || lngNum > 180) {
+      return res.status(422).json({ detail: "Longitude must be between -180 and 180 degrees." });
+    }
+    place.longitude = lngNum;
+  }
+
+  if (radius !== undefined) {
+    const radNum = Number(radius);
+    if (isNaN(radNum) || radNum <= 0 || radNum > 100000) {
+      return res.status(422).json({ detail: "Radius must be greater than 0 and up to 100,000 meters." });
+    }
+    place.radius = radNum;
+  }
+
+  if (icon !== undefined) {
+    place.icon = icon ? String(icon).trim() : null;
+  }
+
+  place.updated_at = new Date().toISOString();
+  saveDB(db);
+
+  res.json(place);
+});
+
+app.delete("/api/circles/:circleId/places/:placeId", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.circleId);
+  const placeId = Number(req.params.placeId);
+  db = loadDB();
+  const userId = req.user!.id;
+
+  const isMember = db.circle_members.some((m) => m.circle_id === circleId && m.user_id === userId);
+  if (!isMember) {
+    return res.status(403).json({ detail: "Access denied: You are not a member of this circle" });
+  }
+
+  const index = (db.places || []).findIndex((p) => p.id === placeId && p.circle_id === circleId);
+  if (index === -1) {
+    return res.status(404).json({ detail: "Place not found in this circle" });
+  }
+
+  db.places.splice(index, 1);
+  saveDB(db);
+
+  res.json({ detail: "Place deleted successfully" });
+});
+
+// Alerts Preview Endpoints
+app.get("/api/circles/:circleId/alerts", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.circleId);
+  db = loadDB();
+  const userId = req.user!.id;
+
+  const isMember = db.circle_members.some((m) => m.circle_id === circleId && m.user_id === userId);
+  if (!isMember) {
+    return res.status(403).json({ detail: "Access denied: You are not a member of this circle" });
+  }
+
+  const userAlerts = (db.alerts || [])
+    .filter((a) => a.circle_id === circleId && a.user_id === userId)
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  res.json(userAlerts);
+});
+
+app.post("/api/circles/:circleId/alerts", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.circleId);
+  db = loadDB();
+  const userId = req.user!.id;
+
+  const isMember = db.circle_members.some((m) => m.circle_id === circleId && m.user_id === userId);
+  if (!isMember) {
+    return res.status(403).json({ detail: "Access denied: You are not a member of this circle" });
+  }
+
+  const { alert_type, title, message, target_user_id } = req.body || {};
+  const allowedTypes = ["arrival", "departure", "stop_sharing", "low_battery", "device_offline"];
+
+  if (!alert_type || !allowedTypes.includes(alert_type)) {
+    return res.status(422).json({ detail: `Invalid alert_type. Must be one of: ${allowedTypes.join(", ")}` });
+  }
+
+  if (!title || !title.trim() || !message || !message.trim()) {
+    return res.status(422).json({ detail: "Title and message are required" });
+  }
+
+  const newAlert: AlertData = {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    circle_id: circleId,
+    user_id: userId,
+    target_user_id: target_user_id ? Number(target_user_id) : null,
+    alert_type,
+    title: title.trim(),
+    message: message.trim(),
+    read: false,
+    created_at: new Date().toISOString()
+  };
+
+  db.alerts = db.alerts || [];
+  db.alerts.push(newAlert);
+  saveDB(db);
+
+  res.status(201).json(newAlert);
+});
+
+app.put("/api/circles/:circleId/alerts/:alertId/read", authenticateToken, (req: AuthRequest, res) => {
+
+  const circleId = Number(req.params.circleId);
+  const alertId = Number(req.params.alertId);
+  db = loadDB();
+  const userId = req.user!.id;
+
+  const isMember = db.circle_members.some((m) => m.circle_id === circleId && m.user_id === userId);
+  if (!isMember) {
+    return res.status(403).json({ detail: "Access denied: You are not a member of this circle" });
+  }
+
+  const alertIndex = (db.alerts || []).findIndex(
+    (a) => a.id === alertId && a.circle_id === circleId && a.user_id === userId
+  );
+
+  if (alertIndex === -1) {
+    return res.status(404).json({ detail: "Alert not found in this circle for this user" });
+  }
+
+  db.alerts[alertIndex].read = true;
+  saveDB(db);
+
+  res.json(db.alerts[alertIndex]);
+});
+
 
 // Devices API
 app.get("/api/devices", authenticateToken, (req: AuthRequest, res) => {
@@ -1305,6 +1651,166 @@ app.post(["/api/events/:event_type", "/api/events"], authenticateToken, (req: Au
   });
 });
 
+function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371000; // meters
+  const phi1 = (lat1 * Math.PI) / 180;
+  const phi2 = (lat2 * Math.PI) / 180;
+  const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
+  const deltaLambda = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
+    Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function evaluateGeofencingPreview(userId: number, entityId: string, lat: number, lon: number): void {
+  console.log(`[Geofence Debug] Evaluating for userId=${userId}, entityId=${entityId}, lat=${lat}, lon=${lon}`);
+  // Active circles of this user
+  const userCircles = db.circle_members.filter((m) => m.user_id === userId).map((m) => m.circle_id);
+  console.log(`[Geofence Debug] userCircles:`, userCircles);
+  if (userCircles.length === 0) return;
+
+  // Places belonging to those circles
+  const places = db.places.filter((p) => userCircles.includes(p.circle_id));
+  console.log(`[Geofence Debug] places count:`, places.length);
+  if (places.length === 0) return;
+
+  const trackedUser = db.users.find((u) => u.id === userId);
+  console.log(`[Geofence Debug] trackedUser:`, trackedUser?.username);
+  if (!trackedUser) return;
+
+  // Location sharing privacy check
+  if (trackedUser.share_location === false) {
+    console.log(`[Geofence Debug] share_location is false for trackedUser`);
+    return;
+  }
+
+  // Device-level location_visibility privacy check
+  const entity = db.entity_states.find((e) => e.entity_id === entityId);
+  console.log(`[Geofence Debug] location_visibility:`, entity?.attributes?.location_visibility);
+  if (entity?.attributes?.location_visibility === "me_only") return;
+
+  db.geofence_states = db.geofence_states || [];
+
+  for (const place of places) {
+    const dist = haversineDistance(lat, lon, place.latitude, place.longitude);
+    const isInsideNow = dist <= place.radius;
+    console.log(`[Geofence Debug] Place '${place.name}': dist=${dist.toFixed(1)}m, radius=${place.radius}m, isInsideNow=${isInsideNow}`);
+
+    // Previous user-level state (if any device was inside)
+    const insideDeviceIds = new Set(
+      db.geofence_states
+        .filter((gs) => gs.user_id === userId && gs.place_id === place.id && gs.inside === true)
+        .map((gs) => gs.device_id)
+    );
+    const wasUserInsideAny = insideDeviceIds.size > 0;
+    console.log(`[Geofence Debug] wasUserInsideAny:`, wasUserInsideAny, `insideDeviceIds:`, Array.from(insideDeviceIds));
+
+    // Specific device state
+    let gstate = db.geofence_states.find(
+      (gs) => gs.user_id === userId && gs.device_id === entityId && gs.place_id === place.id
+    );
+
+    if (!gstate) {
+      console.log(`[Geofence Debug] No previous state for device. Initializing to inside=${isInsideNow}`);
+      // First-ever sample initialization. Avoid triggers.
+      db.geofence_states.push({
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        user_id: userId,
+        device_id: entityId,
+        place_id: place.id,
+        inside: isInsideNow,
+        last_updated: new Date().toISOString()
+      });
+      saveDB(db);
+      continue;
+    }
+
+    const wasDeviceInside = gstate.inside;
+    let isDeviceInsideNow = wasDeviceInside;
+
+    if (!wasDeviceInside) {
+      if (dist <= place.radius) {
+        isDeviceInsideNow = true;
+      }
+    } else {
+      // 20m hysteresis buffer to prevent rapid boundary jitter flapping
+      if (dist > place.radius + 20) {
+        isDeviceInsideNow = false;
+      }
+    }
+    console.log(`[Geofence Debug] wasDeviceInside:`, wasDeviceInside, `isDeviceInsideNow:`, isDeviceInsideNow);
+
+    if (isDeviceInsideNow !== wasDeviceInside) {
+      gstate.inside = isDeviceInsideNow;
+      gstate.last_updated = new Date().toISOString();
+
+      // Check User-level transitions
+      let isUserInsideAnyNow = wasUserInsideAny;
+      if (isDeviceInsideNow) {
+        isUserInsideAnyNow = true;
+      } else {
+        const otherDevicesInside = new Set(insideDeviceIds);
+        otherDevicesInside.delete(entityId);
+        isUserInsideAnyNow = otherDevicesInside.size > 0;
+      }
+
+      const isArrival = !wasUserInsideAny && isUserInsideAnyNow;
+      const isDeparture = wasUserInsideAny && !isUserInsideAnyNow;
+      console.log(`[Geofence Debug] transition change! isArrival=`, isArrival, `isDeparture=`, isDeparture);
+
+      if (isArrival || isDeparture) {
+        // Query all members of the circle to send alerts
+        const circleMembers = db.circle_members.filter((m) => m.circle_id === place.circle_id);
+        console.log(`[Geofence Debug] circleMembers:`, circleMembers.map(m => m.user_id));
+
+        for (const cm of circleMembers) {
+          // Skip sender
+          if (cm.user_id === userId) continue;
+
+          // Check recipient user's notification preferences
+          const recipient = db.users.find((u) => u.id === cm.user_id);
+          console.log(`[Geofence Debug] checking recipient id=${cm.user_id}: notify_arrival_departure=`, recipient?.notify_arrival_departure);
+          if (!recipient || recipient.notify_arrival_departure === false) continue;
+
+          const alertType = isArrival ? "arrival" : "departure";
+          const title = isArrival
+            ? `${trackedUser.display_name} arrived at ${place.name}`
+            : `${trackedUser.display_name} left ${place.name}`;
+          const message = isArrival
+            ? `${trackedUser.display_name} has arrived at ${place.name}.`
+            : `${trackedUser.display_name} has departed from ${place.name}.`;
+
+          const newAlert: AlertData = {
+            id: Date.now() + Math.floor(Math.random() * 1000),
+            circle_id: place.circle_id,
+            user_id: cm.user_id,
+            target_user_id: userId,
+            alert_type: alertType,
+            title,
+            message,
+            read: false,
+            created_at: new Date().toISOString()
+          };
+
+          db.alerts = db.alerts || [];
+          db.alerts.push(newAlert);
+          console.log(`[Geofence Debug] Alert created! recipientId=`, cm.user_id);
+
+          // Broadcast alert over WebSocket
+          broadcastStateUpdate({
+            event_type: "alert_created",
+            data: newAlert
+          });
+        }
+      }
+      saveDB(db);
+    }
+  }
+}
+
 // Home Assistant Companion App Webhook & Telemetry Receiver
 app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, res) => {
   const { type, data } = req.body;
@@ -1330,7 +1836,7 @@ app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, re
         domain: "device_tracker",
         state: "not_home",
         attributes: {
-          friendly_name: req.body.device_name || existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.friendly_name : "Companion Phone",
+          friendly_name: req.body.device_name || (existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.friendly_name : "Companion Phone"),
           battery_level: battery,
           gps_accuracy: accuracy,
           platform: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.platform || "Android" : "Android",
@@ -1365,6 +1871,12 @@ app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, re
 
       saveDB(db);
 
+      try {
+        evaluateGeofencingPreview(userId, entityId, Number(lat), Number(lon));
+      } catch (err) {
+        console.error("Error in evaluateGeofencingPreview:", err);
+      }
+
       // Broadcast update over WebSocket
       broadcastStateUpdate({
         event_type: "state_changed",
@@ -1374,7 +1886,18 @@ app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, re
         }
       });
 
-      return res.json({ success: true, message: "Real location telemetry received" });
+      return res.json({
+        success: true,
+        message: "Real location telemetry received",
+        diagnostics: {
+          userId,
+          entityId,
+          lat: Number(lat),
+          lon: Number(lon),
+          circles: db.circle_members.filter((m) => m.user_id === userId).map((m) => m.circle_id),
+          geofence_states: db.geofence_states
+        }
+      });
     }
   }
 

@@ -3,6 +3,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { getMapStyle } from "../lib/mapStyles";
 import { renderMarkerHTML, getMarkerDimensions } from "../lib/markerRenderer";
+import { DEFAULT_AVATAR_COLOR, getAvatarColor } from "../lib/avatarColor";
 
 interface MapLivePreviewProps {
   styleId: string;
@@ -20,7 +21,7 @@ export const MapLivePreview: React.FC<MapLivePreviewProps> = ({
   pinType = "classic_pin",
   selectedIconSize,
   unselectedIconSize,
-  userColor = "#E2D9F3",
+  userColor = DEFAULT_AVATAR_COLOR,
   userPhoto = null,
   userInitial = "U",
   deviceIcon = "📱 Phone"
@@ -89,7 +90,7 @@ export const MapLivePreview: React.FC<MapLivePreviewProps> = ({
 
       el.innerHTML = renderMarkerHTML({
         pinType: activePinType,
-        baseColor: userColor,
+        baseColor: getAvatarColor(userColor),
         isSelected: true,
         size: selectedIconSize,
         photoUrl: userPhoto,

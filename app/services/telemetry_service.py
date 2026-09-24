@@ -153,7 +153,157 @@ class TelemetryService:
         device.last_seen_at = now
         await db.commit()
 
+        # Run geofence evaluation
+        try:
+            await TelemetryService._evaluate_geofencing(db, device, data)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).exception(f"Error in geofencing evaluator: {e}")
+
         return {"status": "ok"}
+
+    @staticmethod
+    async def _evaluate_geofencing(
+        db: AsyncSession,
+        device: Device,
+        data: LocationUpdateData
+    ) -> None:
+        if not device.user_id:
+            return
+
+        from app.db.models import CircleMember, Place, GeofenceState, User
+        from app.schemas.alerts import AlertCreate
+        from app.services.alert_service import AlertService
+
+        # 1. Fetch all circles where the device owner is a member
+        stmt_circles = select(CircleMember.circle_id).where(CircleMember.user_id == device.user_id)
+        res_circles = await db.execute(stmt_circles)
+        circle_ids = res_circles.scalars().all()
+        if not circle_ids:
+            return
+
+        # 2. Fetch all Places belonging to those circles
+        stmt_places = select(Place).where(Place.circle_id.in_(circle_ids))
+        res_places = await db.execute(stmt_places)
+        places = res_places.scalars().all()
+        if not places:
+            return
+
+        # 3. Process each Place
+        for place in places:
+            distance = haversine_distance(data.latitude, data.longitude, place.latitude, place.longitude)
+            is_inside_now = distance <= place.radius
+
+            # Determine user-level inside/outside before this update
+            stmt_user_inside = select(GeofenceState.device_id).where(
+                GeofenceState.user_id == device.user_id,
+                GeofenceState.place_id == place.id,
+                GeofenceState.inside == True
+            )
+            res_user_inside = await db.execute(stmt_user_inside)
+            inside_device_ids = set(res_user_inside.scalars().all())
+            was_user_inside_any = len(inside_device_ids) > 0
+
+            # Get or create GeofenceState for this specific (user_id, device_id, place_id)
+            stmt_state = select(GeofenceState).where(
+                GeofenceState.user_id == device.user_id,
+                GeofenceState.device_id == device.id,
+                GeofenceState.place_id == place.id
+            )
+            res_state = await db.execute(stmt_state)
+            gstate = res_state.scalar_one_or_none()
+
+            if gstate is None:
+                # Initial state registration for this device. Do not trigger alerts!
+                gstate = GeofenceState(
+                    user_id=device.user_id,
+                    device_id=device.id,
+                    place_id=place.id,
+                    inside=is_inside_now
+                )
+                db.add(gstate)
+                await db.commit()
+                continue
+
+            # Check transition with hysteresis
+            was_device_inside = gstate.inside
+            is_device_inside_now = was_device_inside
+
+            if not was_device_inside:
+                if distance <= place.radius:
+                    is_device_inside_now = True
+            else:
+                # 20m hysteresis buffer to prevent rapid boundary jitter flapping
+                if distance > (place.radius + 20.0):
+                    is_device_inside_now = False
+
+            if is_device_inside_now != was_device_inside:
+                gstate.inside = is_device_inside_now
+                await db.commit()
+                await db.refresh(gstate)
+
+                # Evaluate user-level transition
+                if is_device_inside_now:
+                    is_user_inside_any_now = True
+                else:
+                    other_devices_inside = inside_device_ids - {device.id}
+                    is_user_inside_any_now = len(other_devices_inside) > 0
+
+                is_arrival = (not was_user_inside_any and is_user_inside_any_now)
+                is_departure = (was_user_inside_any and not is_user_inside_any_now)
+
+                if is_arrival or is_departure:
+                    # Fetch the tracked user profile
+                    stmt_user = select(User).where(User.id == device.user_id)
+                    res_user = await db.execute(stmt_user)
+                    tracked_user = res_user.scalar_one_or_none()
+                    if not tracked_user:
+                        continue
+
+                    # Respect privacy: if the tracked user has disabled share_location, do not generate alert
+                    if getattr(tracked_user, "share_location", True) is False:
+                        continue
+
+                    # Respect device-level me_only visibility if set
+                    entity_name = slugify(device.device_name) or f"device_{device.id}"
+                    entity_id = f"device_tracker.{entity_name}"
+                    estate = await StateService.get_state(db, device.user_id, entity_id)
+                    if estate:
+                        attrs = estate.attributes if isinstance(estate.attributes, dict) else {}
+                        if attrs.get("location_visibility") == "me_only":
+                            continue
+
+                    # Query all active circle members
+                    stmt_members = select(User).join(CircleMember).where(CircleMember.circle_id == place.circle_id)
+                    res_members = await db.execute(stmt_members)
+                    members = res_members.scalars().all()
+
+                    for m in members:
+                        # Skip sending to the person who triggered it
+                        if m.id == device.user_id:
+                            continue
+
+                        # Check notification preferences
+                        if not getattr(m, "notify_arrival_departure", True):
+                            continue
+
+                        # Generate alert!
+                        alert_type = "arrival" if is_arrival else "departure"
+                        title = f"{tracked_user.display_name} arrived at {place.name}" if is_arrival else f"{tracked_user.display_name} left {place.name}"
+                        message = f"{tracked_user.display_name} has arrived at {place.name}." if is_arrival else f"{tracked_user.display_name} has departed from {place.name}."
+
+                        await AlertService.create_alert(
+                            db=db,
+                            alert_in=AlertCreate(
+                                circle_id=place.circle_id,
+                                user_id=m.id,
+                                target_user_id=tracked_user.id,
+                                alert_type=alert_type,
+                                title=title,
+                                message=message
+                            )
+                        )
+
 
     @staticmethod
     async def process_sensor_registration(

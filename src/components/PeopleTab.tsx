@@ -1,6 +1,7 @@
 import React from "react";
 import { CircleMember } from "../types";
 import { UserCheck } from "lucide-react";
+import { getAvatarColor } from "../lib/avatarColor";
 
 interface PeopleTabProps {
   members: CircleMember[];
@@ -34,38 +35,40 @@ export const PeopleTab: React.FC<PeopleTabProps> = ({ members, loading, onSelect
         </div>
       ) : (
         <div className="divide-y divide-slate-100/70 border border-slate-100/80 rounded-2xl overflow-hidden bg-white/45 backdrop-blur-md shadow-[0_4px_20px_rgba(0,0,0,0.01)]">
-          {members.map((member) => (
-            <div
-              key={member.id}
-              onClick={() => onSelectMember?.(member)}
-              className="flex items-center justify-between p-4.5 hover:bg-slate-50/70 transition duration-150 cursor-pointer group"
-            >
-              {/* Left Side: Avatar & Display Name */}
-              <div className="flex items-center gap-3.5">
-                <div 
-                  className="h-10 w-10 text-white font-black text-sm flex items-center justify-center select-none transition-all duration-300 overflow-hidden shrink-0 group-hover:scale-105"
-                  style={{ 
-                    backgroundColor: member.avatar_color || "#4f46e5", 
-                    clipPath: "url(#squircle-clip-app)",
-                    filter: `drop-shadow(0 2px 4px ${member.avatar_color || '#4f46e5'}40)`
-                  }}
-                >
-                  {member.profile_picture_url ? (
-                    <img
-                      src={member.profile_picture_url}
-                      alt={member.display_name}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover"
-                      style={{ clipPath: "url(#squircle-clip-app)" }}
-                    />
-                  ) : (
-                    member.display_name.charAt(0).toUpperCase()
-                  )}
+          {members.map((member) => {
+            const avatarBg = getAvatarColor(member.avatar_color);
+            return (
+              <div
+                key={member.id}
+                onClick={() => onSelectMember?.(member)}
+                className="flex items-center justify-between p-4.5 hover:bg-slate-50/70 transition duration-150 cursor-pointer group"
+              >
+                {/* Left Side: Avatar & Display Name */}
+                <div className="flex items-center gap-3.5">
+                  <div 
+                    className="h-10 w-10 text-white font-black text-sm flex items-center justify-center select-none transition-all duration-300 overflow-hidden shrink-0 group-hover:scale-105"
+                    style={{ 
+                      backgroundColor: avatarBg, 
+                      clipPath: "url(#squircle-clip-app)",
+                      filter: `drop-shadow(0 2px 4px ${avatarBg}40)`
+                    }}
+                  >
+                    {member.profile_picture_url ? (
+                      <img
+                        src={member.profile_picture_url}
+                        alt={member.display_name}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover"
+                        style={{ clipPath: "url(#squircle-clip-app)" }}
+                      />
+                    ) : (
+                      member.display_name.charAt(0).toUpperCase()
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-slate-800 group-hover:text-indigo-600 transition">{member.display_name}</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-sm font-bold text-slate-800 group-hover:text-indigo-600 transition">{member.display_name}</p>
-                </div>
-              </div>
 
               {/* Right Side: Companion App Device Badges */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -79,7 +82,8 @@ export const PeopleTab: React.FC<PeopleTabProps> = ({ members, loading, onSelect
                 ))}
               </div>
             </div>
-          ))}
+          );
+        })}
         </div>
       )}
     </div>

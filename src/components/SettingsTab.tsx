@@ -6,6 +6,7 @@ import { MAP_STYLES } from "../lib/mapStyles";
 import { MapLivePreview } from "./MapLivePreview";
 import { QRScannerModal } from "./QRScannerModal";
 import { DeviceIcon } from "./DeviceIcon";
+import { DEFAULT_AVATAR_COLOR, getAvatarColor, isValidHexColor, normalizeHexColor } from "../lib/avatarColor";
 import {
   User,
   Users,
@@ -495,8 +496,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   // ----------------------------------------------------
   const [displayName, setDisplayName] = useState(user?.display_name || "");
   const [username, setUsername] = useState(user?.username || "");
-  const [avatarColor, setAvatarColor] = useState(user?.avatar_color || "#FF9AA2");
-  const [hexInput, setHexInput] = useState((user?.avatar_color || "#FF9AA2").toUpperCase());
+  const [avatarColor, setAvatarColor] = useState(getAvatarColor(user?.avatar_color));
+  const [hexInput, setHexInput] = useState(getAvatarColor(user?.avatar_color).toUpperCase());
   const [showColorPicker, setShowColorPicker] = useState(false);
   const colorPickerBtnRef = useRef<HTMLButtonElement>(null);
   const [savingAccount, setSavingAccount] = useState(false);
@@ -571,7 +572,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     if (user) {
       setDisplayName(user.display_name || "");
       setUsername(user.username || "");
-      const initialColor = user.avatar_color || "#FF9AA2";
+      const initialColor = getAvatarColor(user.avatar_color);
       setAvatarColor(initialColor);
       setHexInput(initialColor.toUpperCase());
     }
@@ -585,19 +586,19 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const handleHexInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setHexInput(val);
-    if (isValidHex(val)) {
-      const normalized = normalizeHex(val);
+    if (isValidHexColor(val)) {
+      const normalized = normalizeHexColor(val);
       setAvatarColor(normalized);
     }
   };
 
   const handleHexInputBlur = () => {
-    if (isValidHex(hexInput)) {
-      const normalized = normalizeHex(hexInput);
+    if (isValidHexColor(hexInput)) {
+      const normalized = normalizeHexColor(hexInput);
       setHexInput(normalized);
       setAvatarColor(normalized);
     } else {
-      setHexInput((avatarColor || "#FF9AA2").toUpperCase());
+      setHexInput(getAvatarColor(avatarColor).toUpperCase());
     }
   };
 
@@ -1092,10 +1093,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   // ----------------------------------------------------
   const [mapStyle, setMapStyle] = useState<string>(user?.map_style || "osm");
   const [selectedIconSize, setSelectedIconSize] = useState<number>(
-    user?.map_selected_icon_size || 48
+    user?.map_selected_icon_size || 72
   );
   const [unselectedIconSize, setUnselectedIconSize] = useState<number>(
-    user?.map_unselected_icon_size || 36
+    user?.map_unselected_icon_size || 64
   );
 
   useEffect(() => {
@@ -1398,7 +1399,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 <div
                   className="w-16 h-16 flex items-center justify-center text-white font-black text-xl overflow-hidden shrink-0"
                   style={{ 
-                    backgroundColor: avatarColor,
+                    backgroundColor: getAvatarColor(avatarColor),
                     clipPath: "url(#squircle-clip-app)",
                     filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.15))"
                   }}
@@ -1555,7 +1556,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                           : "border-slate-200/90 hover:border-slate-300"
                       }`}
                       style={{
-                        backgroundColor: isValidHex(avatarColor) ? normalizeHex(avatarColor) : "#FF9AA2"
+                        backgroundColor: getAvatarColor(avatarColor)
                       }}
                       title="Choose custom colour"
                       aria-label="Choose custom colour"
@@ -1566,7 +1567,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                     {showColorPicker && (
                       <CustomColorPickerPopover
                         anchorRef={colorPickerBtnRef}
-                        color={isValidHex(avatarColor) ? normalizeHex(avatarColor) : "#FF9AA2"}
+                        color={getAvatarColor(avatarColor)}
                         onChange={(newHex) => {
                           setAvatarColor(newHex);
                           setHexInput(newHex);
@@ -1815,10 +1816,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <div>
               <MapLivePreview
                 styleId={mapStyle}
-                pinType={user?.map_pin_type || "classic_pin"}
                 selectedIconSize={selectedIconSize}
                 unselectedIconSize={unselectedIconSize}
-                userColor={avatarColor}
+                userColor={getAvatarColor(avatarColor)}
                 userPhoto={user?.profile_picture_url}
                 userInitial={(displayName || username || "U").charAt(0).toUpperCase()}
                 deviceIcon={devicesList[0]?.map_icon || "📱 Phone"}
@@ -1874,7 +1874,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 />
                 <div className="flex justify-between text-[10px] text-slate-400 font-mono">
                   <span>24px</span>
-                  <span className="text-indigo-600 font-bold">48px Default</span>
+                  <span className="text-indigo-600 font-bold">72px Default</span>
                   <span>72px</span>
                 </div>
               </div>
@@ -1901,7 +1901,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 />
                 <div className="flex justify-between text-[10px] text-slate-400 font-mono">
                   <span>24px</span>
-                  <span className="text-indigo-600 font-bold">36px Default</span>
+                  <span className="text-indigo-600 font-bold">64px Default</span>
                   <span>72px</span>
                 </div>
               </div>
@@ -2936,7 +2936,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   <div
                     className="w-20 h-20 flex items-center justify-center text-white font-black text-2xl overflow-hidden mb-3.5 relative shrink-0"
                     style={{ 
-                      backgroundColor: avatarColor,
+                      backgroundColor: getAvatarColor(avatarColor),
                       clipPath: "url(#squircle-clip-app)",
                       filter: "drop-shadow(0 4px 8px rgba(0,0,0,0.15))"
                     }}

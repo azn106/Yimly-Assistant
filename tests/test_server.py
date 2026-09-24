@@ -1915,6 +1915,103 @@ async def test_notification_settings_flow():
     assert st_res.json()["attributes"]["latitude"] == 37.7555
 
 
+@pytest.mark.asyncio
+async def test_avatar_color_propagation_flow():
+    client = TestClient(app)
+    suffix = uuid.uuid4().hex[:8]
+    uname1 = f"color_u1_{suffix}"
+    uname2 = f"color_u2_{suffix}"
+
+    # 1. Create User 1 and User 2 via AuthService / DB
+    async with db_session_test_maker() as db:
+        u1_in = UserCreate(username=uname1, password="password123", display_name="Color User 1")
+        await AuthService.create_user(db, u1_in)
+        u2_in = UserCreate(username=uname2, password="password123", display_name="Color User 2")
+        await AuthService.create_user(db, u2_in)
+
+    # 2. Login User 1
+    login1 = client.post("/api/auth/login", json={
+        "username": uname1,
+        "password": "password123"
+    })
+    assert login1.status_code == 200
+    token1 = login1.json()["access_token"]
+    u1 = login1.json()["user"]
+    assert "avatar_color" in u1
+
+    # Update User 1's avatar_color to a custom pastel hex (#FF9AA2)
+    custom_color1 = "#FF9AA2"
+    put_res = client.put("/api/auth/profile", json={
+        "avatar_color": custom_color1
+    }, headers={"Authorization": f"Bearer {token1}"})
+    assert put_res.status_code == 200
+    assert put_res.json()["avatar_color"] == custom_color1
+
+    # Verify GET /api/auth/me returns updated avatar_color
+    me_res = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token1}"})
+    assert me_res.status_code == 200
+    assert me_res.json()["avatar_color"] == custom_color1
+
+    # 3. Create Circle as User 1
+    create_c = client.post("/api/circles", json={"name": f"Color Circle {suffix}"}, headers={"Authorization": f"Bearer {token1}"})
+    assert create_c.status_code == 200
+    circle = create_c.json()
+    invite_code = circle["invite_code"]
+
+    # Login User 2
+    login2 = client.post("/api/auth/login", json={
+        "username": uname2,
+        "password": "password123"
+    })
+    assert login2.status_code == 200
+    token2 = login2.json()["access_token"]
+
+    # User 2 sets a different custom color (#B5EAD7)
+    custom_color2 = "#B5EAD7"
+    put_res2 = client.put("/api/auth/profile", json={"avatar_color": custom_color2}, headers={"Authorization": f"Bearer {token2}"})
+    assert put_res2.status_code == 200
+    assert put_res2.json()["avatar_color"] == custom_color2
+
+    # User 2 joins Circle
+    join_res = client.post("/api/circles/join", json={"invite_code": invite_code}, headers={"Authorization": f"Bearer {token2}"})
+    assert join_res.status_code == 200
+
+    # 4. Fetch circle members and verify both members preserve their respective avatar_color
+    circle_id = circle["id"]
+    members_res = client.get(f"/api/circles/{circle_id}/members", headers={"Authorization": f"Bearer {token1}"})
+    assert members_res.status_code == 200
+    members = members_res.json()
+    assert len(members) == 2
+
+    # 5. Relogin verification (logout/login flow)
+    relogin1 = client.post("/api/auth/login", json={
+        "username": uname1,
+        "password": "password123"
+    })
+    assert relogin1.status_code == 200
+    assert relogin1.json()["user"]["avatar_color"] == custom_color1
+
+    # 6. Null avatar_color update / fallback verification
+    uname3 = f"color_u3_{suffix}"
+    async with db_session_test_maker() as db:
+        u3_in = UserCreate(username=uname3, password="password123", display_name="Default Color User")
+        await AuthService.create_user(db, u3_in)
+
+    login3 = client.post("/api/auth/login", json={
+        "username": uname3,
+        "password": "password123"
+    })
+    assert login3.status_code == 200
+    token3 = login3.json()["access_token"]
+    # Verify initial avatar_color is None (which maps to DEFAULT_AVATAR_COLOR on frontend)
+    assert login3.json()["user"]["avatar_color"] is None
+
+    me3 = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token3}"})
+    assert me3.status_code == 200
+    assert me3.json()["avatar_color"] is None
+
+
+
 
 
 

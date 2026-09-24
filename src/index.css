@@ -211,4 +211,28 @@ body,
   }
 }
 
+/* Custom Place Map Popup styling */
+.custom-place-popup .maplibregl-popup-content {
+  background: transparent !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+  border-radius: 1rem !important;
+}
+.custom-place-popup .maplibregl-popup-tip {
+  border-top-color: #0f172a !important;
+  border-bottom-color: #0f172a !important;
+}
+.custom-place-popup .maplibregl-popup-close-button {
+  color: #94a3b8 !important;
+  font-size: 16px !important;
+  padding: 4px 8px !important;
+  border-radius: 9999px !important;
+  top: 6px !important;
+  right: 6px !important;
+}
+.custom-place-popup .maplibregl-popup-close-button:hover {
+  background-color: rgba(255, 255, 255, 0.1) !important;
+  color: #ffffff !important;
+}
+
 

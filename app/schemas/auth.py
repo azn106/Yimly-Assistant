@@ -13,8 +13,8 @@ class UserResponse(BaseModel):
     avatar_color: Optional[str] = None
     profile_picture_url: Optional[str] = None
     map_style: Optional[str] = "osm"
-    map_selected_icon_size: Optional[int] = 48
-    map_unselected_icon_size: Optional[int] = 36
+    map_selected_icon_size: Optional[int] = 72
+    map_unselected_icon_size: Optional[int] = 64
     share_location: bool = True
     save_location_history: bool = True
     history_retention: str = "30d"

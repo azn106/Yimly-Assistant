@@ -1,82 +1,12 @@
 /**
  * Commercial-Grade Map Marker Rendering System
- * Supports 8 distinct, professionally crafted pin silhouettes with exact GPS geographic anchor alignment.
+ * Squircle map pin silhouette with exact GPS geographic anchor alignment.
  */
 
 import { getDeviceIconSVGString } from "../components/DeviceIcon";
+import { DEFAULT_AVATAR_COLOR, getAvatarColor } from "./avatarColor";
 
-export type MapPinType =
-  | "classic_pin"
-  | "circle"
-  | "teardrop"
-  | "beacon"
-  | "badge"
-  | "minimal"
-  | "arrow"
-  | "photo_pin";
-
-export interface MapPinTypeDefinition {
-  id: MapPinType;
-  name: string;
-  description: string;
-  heightRatio: number; // Height = width * heightRatio
-}
-
-export const MAP_PIN_TYPES: MapPinTypeDefinition[] = [
-  {
-    id: "classic_pin",
-    name: "Classic Pin",
-    description: "Squircle map pin with integrated downward pointer",
-    heightRatio: 1.18
-  },
-  {
-    id: "circle",
-    name: "Circle",
-    description: "Clean circular avatar with integrated location anchor",
-    heightRatio: 1.16
-  },
-  {
-    id: "teardrop",
-    name: "Teardrop",
-    description: "Smooth organic teardrop silhouette with precision point",
-    heightRatio: 1.32
-  },
-  {
-    id: "beacon",
-    name: "Beacon",
-    description: "Modern radar beacon marker with location anchor",
-    heightRatio: 1.28
-  },
-  {
-    id: "badge",
-    name: "Badge",
-    description: "Premium shield badge with downward anchor point",
-    heightRatio: 1.24
-  },
-  {
-    id: "minimal",
-    name: "Minimal",
-    description: "Compact avatar medallion on a precision location needle",
-    heightRatio: 1.38
-  },
-  {
-    id: "arrow",
-    name: "Arrow",
-    description: "Directional geometric marker with crisp downward tip",
-    heightRatio: 1.30
-  },
-  {
-    id: "photo_pin",
-    name: "Photo Pin",
-    description: "Dominant edge-to-edge photo portrait in a sleek pin frame",
-    heightRatio: 1.30
-  }
-];
-
-export function getPinTypeDefinition(type?: string | null): MapPinTypeDefinition {
-  const found = MAP_PIN_TYPES.find((t) => t.id === type);
-  return found || MAP_PIN_TYPES[0];
-}
+export type MapPinType = "classic_pin";
 
 export interface StackedMemberInfo {
   id: number | string;
@@ -104,11 +34,11 @@ export interface RenderMarkerOptions {
 
 /**
  * Calculates outer element dimensions for the marker.
+ * Height = width * 1.18 (squircle pin aspect ratio).
  * Anchor is always 'bottom' so the bottommost tip represents exact GPS coordinate.
  */
 export function getMarkerDimensions(pinType: MapPinType | string | null | undefined, width: number) {
-  const def = getPinTypeDefinition(pinType);
-  const height = Math.round(width * def.heightRatio);
+  const height = Math.round(width * 1.18);
   return {
     width,
     height,
@@ -119,70 +49,13 @@ export function getMarkerDimensions(pinType: MapPinType | string | null | undefi
 /**
  * Escapes HTML entities safely for innerHTML injection
  */
-function escapeHtml(str: string): string {
+export function escapeHtml(str: string): string {
   return str
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
-}
-
-/**
- * Renders a mathematical squircle avatar that matches the bottom map selector.
- */
-function renderSharedSquircleAvatar(
-  size: number,
-  photoUrl: string | null,
-  memberName: string,
-  baseColor: string,
-  outerBorderSize: number = 3.5,
-  separatorSize: number = 1.5
-): string {
-  const initial = memberName.charAt(0).toUpperCase() || "U";
-  return `
-    <div
-      class="relative flex items-center justify-center pointer-events-none"
-      style="
-        width: ${size}px;
-        height: ${size}px;
-        background-color: ${baseColor};
-        clip-path: url(#squircle-clip-app);
-      "
-    >
-      <!-- Subtle neutral grey separator layer immediately inside the outer baseColor border -->
-      <div
-        class="absolute flex items-center justify-center pointer-events-none"
-        style="
-          left: ${outerBorderSize}px;
-          right: ${outerBorderSize}px;
-          top: ${outerBorderSize}px;
-          bottom: ${outerBorderSize}px;
-          background-color: #e2e8f0;
-          clip-path: url(#squircle-clip-app);
-        "
-      >
-        <!-- Inner user photo/initial squircle container -->
-        <div
-          class="absolute flex items-center justify-center text-white font-black overflow-hidden pointer-events-none"
-          style="
-            left: ${separatorSize}px;
-            right: ${separatorSize}px;
-            top: ${separatorSize}px;
-            bottom: ${separatorSize}px;
-            background-color: ${baseColor};
-            clip-path: url(#squircle-clip-app);
-          "
-        >
-          ${
-            photoUrl
-              ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(memberName)}" class="w-full h-full object-cover pointer-events-none" style="clip-path: url(#squircle-clip-app);" />`
-              : `<span class="text-white font-extrabold text-xs drop-shadow-xs">${escapeHtml(initial)}</span>`
-          }
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 /**
@@ -193,7 +66,7 @@ function renderSharedSquircleAvatar(
 export function renderMarkerHTML(options: RenderMarkerOptions): string {
   const {
     pinType = "classic_pin",
-    baseColor = "#4f46e5",
+    baseColor: rawBaseColor,
     isSelected = false,
     size = 48,
     photoUrl = null,
@@ -205,13 +78,10 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
     stackedMembers
   } = options;
 
+  const baseColor = getAvatarColor(rawBaseColor);
   const breathingClass = isPrimary ? "marker-breathe-primary" : "marker-breathe-secondary";
 
-  const validPinType: MapPinType = (
-    MAP_PIN_TYPES.some((t) => t.id === pinType) ? pinType : "classic_pin"
-  ) as MapPinType;
-
-  const { width: W, height: H } = getMarkerDimensions(validPinType, size);
+  const { width: W, height: H } = getMarkerDimensions(pinType, size);
   const squircleSize = W;
   const outerBorder = isSelected ? 4 : 3.5;
   const separatorThickness = 1.5;
@@ -231,7 +101,7 @@ export function renderMarkerHTML(options: RenderMarkerOptions): string {
       ];
 
   const memberCount = memberList.length;
-  const memberColors = memberList.map((m) => m.baseColor || "#4f46e5");
+  const memberColors = memberList.map((m) => getAvatarColor(m.baseColor));
 
   // Combined member colour gradient for outer border and pointer
   let outerBackgroundCSS = baseColor;
@@ -640,9 +510,10 @@ export function renderCombinedMarkerHTML(options: RenderCombinedMarkerOptions): 
   const memberCount = members.length;
   const colorStopsCSS = members
     .map((m, idx) => {
+      const col = getAvatarColor(m.baseColor);
       const startPct = ((idx / memberCount) * 100).toFixed(2);
       const endPct = (((idx + 1) / memberCount) * 100).toFixed(2);
-      return `${m.baseColor} ${startPct}%, ${m.baseColor} ${endPct}%`;
+      return `${col} ${startPct}%, ${col} ${endPct}%`;
     })
     .join(", ");
   const multiColorBackground = `linear-gradient(to right, ${colorStopsCSS})`;
@@ -650,9 +521,10 @@ export function renderCombinedMarkerHTML(options: RenderCombinedMarkerOptions): 
   const gradientId = `bubble-tip-grad-${members.map((m) => String(m.id)).join("-")}`;
   const svgColorStops = members
     .map((m, idx) => {
+      const col = getAvatarColor(m.baseColor);
       const startPct = ((idx / memberCount) * 100).toFixed(2);
       const endPct = (((idx + 1) / memberCount) * 100).toFixed(2);
-      return `<stop offset="${startPct}%" stop-color="${escapeHtml(m.baseColor)}" /><stop offset="${endPct}%" stop-color="${escapeHtml(m.baseColor)}" />`;
+      return `<stop offset="${startPct}%" stop-color="${escapeHtml(col)}" /><stop offset="${endPct}%" stop-color="${escapeHtml(col)}" />`;
     })
     .join("");
 
@@ -665,6 +537,7 @@ export function renderCombinedMarkerHTML(options: RenderCombinedMarkerOptions): 
     .map((m) => {
       const initial = m.name.charAt(0).toUpperCase() || "U";
       const isCurrentSelected = Boolean(m.isSelected);
+      const mColor = getAvatarColor(m.baseColor);
 
       return `
         <div
@@ -673,7 +546,7 @@ export function renderCombinedMarkerHTML(options: RenderCombinedMarkerOptions): 
           style="
             width: ${dims.avatarSize}px;
             height: ${dims.avatarSize}px;
-            background-color: ${m.baseColor};
+            background-color: ${mColor};
             clip-path: url(#squircle-clip-app);
             ${isCurrentSelected ? 'outline: 2px solid white; outline-offset: -1px; z-index: 2;' : ''}
           "
@@ -816,7 +689,7 @@ export function renderPrivateDeviceMarkerHTML(options: PrivateDeviceMarkerOption
       <div
         class="private-breathe-anim relative w-[34px] h-[34px] rounded-full bg-white flex items-center justify-center pointer-events-auto"
         style="
-          border: 2px solid ${ownerColor || '#4f46e5'};
+          border: 2px solid ${getAvatarColor(ownerColor)};
           box-shadow: none !important;
           filter: none !important;
         "
@@ -829,3 +702,60 @@ export function renderPrivateDeviceMarkerHTML(options: PrivateDeviceMarkerOption
     </div>
   `;
 }
+
+export function getPlaceIconSVGString(iconName?: string | null): string {
+  const norm = (iconName || "map-pin").toLowerCase().trim();
+  switch (norm) {
+    case "home":
+      return `<path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>`;
+    case "briefcase":
+    case "work":
+      return `<rect width="20" height="14" x="2" y="7" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>`;
+    case "school":
+      return `<path d="M14 22v-4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v4"/><path d="M18 22V6a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16"/><path d="M18 10h4v12"/><path d="M6 10H2v12"/><path d="M12 2v2"/>`;
+    case "shopping-bag":
+    case "shop":
+      return `<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><line x1="3" x2="21" y1="6" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/>`;
+    case "coffee":
+    case "cafe":
+      return `<path d="M17 8h1a4 4 0 0 1 0 8h-1"/><path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z"/><line x1="6" x2="6" y1="2" y2="4"/><line x1="10" x2="10" y1="2" y2="4"/><line x1="14" x2="14" y1="2" y2="4"/>`;
+    case "heart":
+    case "family":
+      return `<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>`;
+    case "building":
+      return `<rect width="16" height="20" x="4" y="2" rx="2" ry="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01"/><path d="M16 6h.01"/><path d="M8 10h.01"/><path d="M16 10h.01"/><path d="M8 14h.01"/><path d="M16 14h.01"/>`;
+    case "navigation":
+    case "zone":
+      return `<polygon points="3 11 22 2 13 21 11 13 3 11"/>`;
+    case "map-pin":
+    case "pin":
+    default:
+      return `<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>`;
+  }
+}
+
+export interface PlaceMarkerOptions {
+  name: string;
+  icon?: string | null;
+  radius?: number;
+}
+
+export function renderPlaceMarkerHTML(options: PlaceMarkerOptions): string {
+  const { name, icon } = options;
+  const svgInner = getPlaceIconSVGString(icon);
+  const safeName = escapeHtml(name || "Place");
+
+  return `
+    <div class="relative group flex flex-col items-center select-none cursor-pointer pointer-events-auto">
+      <div class="relative w-9 h-9 rounded-full bg-slate-900 border-2 border-indigo-400/80 text-indigo-400 flex items-center justify-center shadow-[0_4px_14px_rgba(0,0,0,0.35)] transition-transform duration-150 group-hover:scale-110">
+        <svg class="w-4.5 h-4.5 stroke-current fill-none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+          ${svgInner}
+        </svg>
+      </div>
+      <div class="mt-1 px-2 py-0.5 rounded-md bg-slate-900/90 backdrop-blur-md border border-slate-700/80 text-[10px] font-extrabold text-white tracking-wide shadow-lg max-w-[110px] truncate text-center">
+        ${safeName}
+      </div>
+    </div>
+  `;
+}
+

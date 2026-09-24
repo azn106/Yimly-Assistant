@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Lock,
@@ -6,13 +6,15 @@ import {
   RefreshCw,
   AlertCircle,
   Home,
+  Users,
+  Compass,
+  Bell,
   UserCheck,
   Settings as SettingsIcon,
   X
 } from "lucide-react";
 
-import { Circle, CircleMember, UserInfo } from "./types";
-import { NavIcon, NavIconPackId } from "./lib/navIcons";
+import { Circle, CircleMember, UserInfo, Place } from "./types";
 import { MapComponent, MapComponentHandle } from "./components/MapComponent";
 import { PeopleTab } from "./components/PeopleTab";
 import { PlacesTab } from "./components/PlacesTab";
@@ -20,6 +22,7 @@ import { AlertsTab } from "./components/AlertsTab";
 import { SettingsTab } from "./components/SettingsTab";
 import { PreviewTestState, processPreviewTestMembers } from "./lib/previewTestMode";
 import { PreviewTestModeControls } from "./components/PreviewTestModeControls";
+import { getAvatarColor } from "./lib/avatarColor";
 
 export default function App() {
   const [status, setStatus] = useState<"checking" | "setup" | "login" | "authenticated" | "register">("checking");
@@ -52,6 +55,9 @@ export default function App() {
   const [circleMembers, setCircleMembers] = useState<CircleMember[]>([]);
   const [circlesLoading, setCirclesLoading] = useState(false);
 
+  // Places State
+  const [places, setPlaces] = useState<Place[]>([]);
+
   // Tab State: "map" | "people" | "places" | "alerts" | "settings"
   const [activeTab, setActiveTab] = useState<"map" | "people" | "places" | "alerts" | "settings">("map");
 
@@ -66,14 +72,30 @@ export default function App() {
     testState
   );
 
-  // Navigation Icon Pack State: "classic" | "minimal" | "rounded" | "bold" | "modern"
-  const [navIconPack, setNavIconPack] = useState<NavIconPackId>(() => {
-    const saved = localStorage.getItem("nav_icon_pack");
-    if (saved && ["classic", "minimal", "rounded", "bold", "modern"].includes(saved)) {
-      return saved as NavIconPackId;
+  // Fetch Places for selected circle
+  const fetchPlaces = useCallback(async (circleId: number) => {
+    const token = localStorage.getItem("access_token");
+    if (!token || !circleId) {
+      setPlaces([]);
+      return;
     }
-    return "classic";
-  });
+    try {
+      const res = await fetch(`/api/circles/${circleId}/places`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPlaces(data);
+      } else {
+        setPlaces([]);
+      }
+    } catch (err) {
+      console.warn("Unable to fetch places:", err);
+      setPlaces([]);
+    }
+  }, []);
 
   // Run on mount to check existing session, setup status, and register SW
   useEffect(() => {
@@ -81,18 +103,22 @@ export default function App() {
     registerServiceWorker();
   }, []);
 
-  // Periodic location polling for active members
+  // Periodic location polling for active members and fetching places on circle change
   useEffect(() => {
-    if (status !== "authenticated" || !selectedCircle) return;
+    if (status !== "authenticated" || !selectedCircle) {
+      setPlaces([]);
+      return;
+    }
 
     fetchCircleMembers(selectedCircle.id); // Load immediately on circle switch
+    fetchPlaces(selectedCircle.id);
 
     const interval = setInterval(() => {
       fetchCircleMembers(selectedCircle.id, true); // Silent background reload
     }, 15000); // 15 seconds real-time update loop
 
     return () => clearInterval(interval);
-  }, [status, selectedCircle]);
+  }, [status, selectedCircle, fetchPlaces]);
 
   const registerServiceWorker = () => {
     if ("serviceWorker" in navigator) {
@@ -455,6 +481,7 @@ export default function App() {
             <MapComponent
               ref={mapComponentRef}
               members={displayMembers}
+              places={places}
               currentUser={displayUser}
               onRefresh={() => selectedCircle && fetchCircleMembers(selectedCircle.id)}
               loading={circlesLoading}
@@ -485,7 +512,7 @@ export default function App() {
                   : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
               }`}
             >
-              <NavIcon tab="map" pack={navIconPack} isSelected={activeTab === "map"} className="w-4 h-4" />
+              <Home className="w-4 h-4" />
               <span>Map</span>
             </button>
 
@@ -497,7 +524,7 @@ export default function App() {
                   : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
               }`}
             >
-              <NavIcon tab="people" pack={navIconPack} isSelected={activeTab === "people"} className="w-4 h-4" />
+              <Users className="w-4 h-4" />
               <span>People</span>
             </button>
 
@@ -509,7 +536,7 @@ export default function App() {
                   : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
               }`}
             >
-              <NavIcon tab="places" pack={navIconPack} isSelected={activeTab === "places"} className="w-4 h-4" />
+              <Compass className="w-4 h-4" />
               <span>Places</span>
             </button>
 
@@ -521,7 +548,7 @@ export default function App() {
                   : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
               }`}
             >
-              <NavIcon tab="alerts" pack={navIconPack} isSelected={activeTab === "alerts"} className="w-4 h-4" />
+              <Bell className="w-4 h-4" />
               <span>Alerts</span>
             </button>
 
@@ -536,21 +563,21 @@ export default function App() {
                   : ""
               }`}
               style={{
-                backgroundColor: user?.avatar_color || "#4f46e5",
+                backgroundColor: getAvatarColor(displayUser?.avatar_color || user?.avatar_color),
                 clipPath: "url(#squircle-clip-app)",
-                filter: `drop-shadow(0 2px 4px ${user?.avatar_color || '#4f46e5'}60)`
+                filter: `drop-shadow(0 2px 4px ${getAvatarColor(displayUser?.avatar_color || user?.avatar_color)}60)`
               }}
-              title={`${user?.display_name} (Settings)`}
+              title={`${displayUser?.display_name || user?.display_name} (Settings)`}
             >
-              {user?.profile_picture_url ? (
+              {(displayUser?.profile_picture_url || user?.profile_picture_url) ? (
                 <img
-                  src={user.profile_picture_url}
-                  alt={user.display_name}
+                  src={displayUser?.profile_picture_url || user?.profile_picture_url || undefined}
+                  alt={displayUser?.display_name || user?.display_name}
                   className="w-full h-full object-cover"
                   style={{ clipPath: "url(#squircle-clip-app)" }}
                 />
               ) : (
-                user?.display_name?.charAt(0).toUpperCase()
+                (displayUser?.display_name || user?.display_name || "U").charAt(0).toUpperCase()
               )}
             </div>
           </nav>
@@ -606,7 +633,7 @@ export default function App() {
               <div className="flex items-center gap-4 mx-auto">
                 {displayMembers.map((member) => {
                   const isSelected = selectedMemberId === member.id;
-                  const memberColor = member.avatar_color || "#4f46e5";
+                  const memberColor = getAvatarColor(member.avatar_color);
 
                   return (
                     <button
@@ -726,7 +753,11 @@ export default function App() {
                 )}
 
                 {activeTab === "places" && (
-                  <PlacesTab />
+                  <PlacesTab
+                    selectedCircle={selectedCircle}
+                    onNavigateToSettings={() => setActiveTab("settings")}
+                    onPlacesUpdated={() => selectedCircle && fetchPlaces(selectedCircle.id)}
+                  />
                 )}
 
                 {activeTab === "alerts" && (
