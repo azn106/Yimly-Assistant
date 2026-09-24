@@ -11,6 +11,7 @@ from app.db.models import User, LocationHistory, CircleMember, EntityState
 from app.schemas.api import ConfigResponse, EntityStateResponse, UnitSystem
 from app.services.state_service import StateService
 from app.services.event_service import event_bus
+from app.services.telemetry_service import cleanup_history_for_user
 
 router = APIRouter()
 
@@ -204,6 +205,11 @@ async def api_get_history_period(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Not authorized to view this member's location history"
             )
+
+    # Prune expired history for target user according to their retention setting
+    stmt_target_user = select(User.history_retention).where(User.id == target_user_id)
+    target_retention = (await db.execute(stmt_target_user)).scalar_one_or_none() or "30d"
+    await cleanup_history_for_user(db, target_user_id, target_retention)
 
     stmt = select(LocationHistory).where(LocationHistory.user_id == target_user_id)
     if hours:

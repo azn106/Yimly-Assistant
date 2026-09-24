@@ -39,3 +39,15 @@ async def register_mobile_app(
         cloudhook_url=None,
         remote_ui_url=None
     )
+
+
+@router.get("/api/mobile_app/config")
+async def get_mobile_app_config(
+    user: User = Depends(require_authenticated_user)
+):
+    return {
+        "share_location": user.share_location if user.share_location is not None else True,
+        "update_frequency": user.location_update_frequency or "realtime",
+        "save_location_history": user.save_location_history if user.save_location_history is not None else True,
+        "history_retention": user.history_retention or "30d"
+    }

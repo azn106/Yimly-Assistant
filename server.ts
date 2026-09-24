@@ -1360,8 +1360,8 @@ app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, re
           accuracy,
           timestamp: now
         });
-        cleanupHistoryForUser(db, userId, targetUser?.history_retention);
       }
+      cleanupHistoryForUser(db, userId, targetUser?.history_retention);
 
       saveDB(db);
 

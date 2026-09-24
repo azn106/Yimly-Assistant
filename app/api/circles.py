@@ -3,7 +3,7 @@ import logging
 from typing import List
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_authenticated_user
@@ -88,6 +88,107 @@ async def join_circle(
 
     return circle
 
+@router.post("/{circle_id}/leave")
+async def leave_circle(
+    circle_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_authenticated_user)
+):
+    # Verify circle exists
+    stmt_circle = select(Circle).where(Circle.id == circle_id)
+    res_circle = await db.execute(stmt_circle)
+    circle = res_circle.scalar_one_or_none()
+
+    if not circle:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Circle not found."
+        )
+
+    # Verify user is actually a member of this circle
+    stmt_member = select(CircleMember).where(
+        CircleMember.circle_id == circle_id,
+        CircleMember.user_id == user.id
+    )
+    res_member = await db.execute(stmt_member)
+    membership = res_member.scalar_one_or_none()
+
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You are not a member of this circle."
+        )
+
+    circle_name = circle.name
+
+    # Remove ONLY the authenticated user's membership
+    await db.delete(membership)
+    await db.commit()
+
+    # Check remaining members in the circle
+    stmt_remaining = select(CircleMember).where(CircleMember.circle_id == circle_id)
+    res_remaining = await db.execute(stmt_remaining)
+    remaining_members = res_remaining.scalars().all()
+
+    if len(remaining_members) == 0:
+        # If removing the user leaves 0 members, cleanly delete the empty circle
+        await db.delete(circle)
+        await db.commit()
+    else:
+        # If the departing user was the recorded owner_id, reassign to a remaining member
+        # to ensure referential integrity with users table
+        if circle.owner_id == user.id:
+            circle.owner_id = remaining_members[0].user_id
+            await db.commit()
+
+    return {"success": True, "message": f"Successfully left {circle_name}."}
+
+@router.delete("/{circle_id}")
+@router.post("/{circle_id}/delete")
+async def delete_circle(
+    circle_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_authenticated_user)
+):
+    # Verify circle exists
+    stmt_circle = select(Circle).where(Circle.id == circle_id)
+    res_circle = await db.execute(stmt_circle)
+    circle = res_circle.scalar_one_or_none()
+
+    if not circle:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Circle not found."
+        )
+
+    # Verify user is actually a member of this circle
+    stmt_member = select(CircleMember).where(
+        CircleMember.circle_id == circle_id,
+        CircleMember.user_id == user.id
+    )
+    res_member = await db.execute(stmt_member)
+    membership = res_member.scalar_one_or_none()
+
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to delete this Circle."
+        )
+
+    circle_name = circle.name
+
+    # Remove all CircleMember records belonging to that circle
+    await db.execute(delete(CircleMember).where(CircleMember.circle_id == circle_id))
+
+    # Delete the Circle itself cleanly
+    await db.delete(circle)
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": f'Family Circle "{circle_name}" has been deleted.'
+    }
+
 @router.get("", response_model=List[CircleResponse])
 async def list_circles(
     db: AsyncSession = Depends(get_db),
@@ -169,10 +270,15 @@ async def list_circle_members(
         devices_loc.sort(key=lambda d: 0 if d.is_default else 1)
 
         # STRICT PRIVACY ENFORCEMENT:
-        # Other circle members receive ONLY the single default shared device location.
+        # Other circle members receive ONLY the single default shared device location,
+        # UNLESS the member has disabled location sharing (share_location is False),
+        # in which case no devices or location coordinates are exposed to other members.
         # The requesting user receives all their own devices (default at [0], private non-defaults at [1..N]).
         if member.id != user.id:
-            filtered_devices = devices_loc[:1] if len(devices_loc) > 0 else []
+            if getattr(member, "share_location", True) is False:
+                filtered_devices = []
+            else:
+                filtered_devices = devices_loc[:1] if len(devices_loc) > 0 else []
         else:
             filtered_devices = devices_loc
 

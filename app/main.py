@@ -74,6 +74,47 @@ async def on_startup() -> None:
             except Exception:
                 # Column likely already exists, ignore
                 pass
+
+            # Dynamically migrate share_location if it doesn't exist
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN share_location BOOLEAN DEFAULT 1;"))
+                logger.info("Database migration: Added share_location column to users table.")
+            except Exception:
+                # Column likely already exists, ignore
+                pass
+
+            # Dynamically migrate save_location_history if it doesn't exist
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN save_location_history BOOLEAN DEFAULT 1;"))
+                logger.info("Database migration: Added save_location_history column to users table.")
+            except Exception:
+                # Column likely already exists, ignore
+                pass
+
+            # Dynamically migrate history_retention if it doesn't exist
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN history_retention VARCHAR(20) DEFAULT '30d';"))
+                logger.info("Database migration: Added history_retention column to users table.")
+            except Exception:
+                # Column likely already exists, ignore
+                pass
+
+            # Dynamically migrate location_update_frequency if it doesn't exist
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN location_update_frequency VARCHAR(20) DEFAULT 'realtime';"))
+                logger.info("Database migration: Added location_update_frequency column to users table.")
+            except Exception:
+                # Column likely already exists, ignore
+                pass
+
+            # Dynamically migrate notification preference columns if they don't exist
+            for col in ["notify_push", "notify_arrival_departure", "notify_stop_sharing", "notify_low_battery", "notify_device_offline"]:
+                try:
+                    await conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} BOOLEAN DEFAULT 1;"))
+                    logger.info(f"Database migration: Added {col} column to users table.")
+                except Exception:
+                    # Column likely already exists, ignore
+                    pass
                 
         logger.info("Database schemas created/verified successfully.")
     except Exception as e:

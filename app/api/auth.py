@@ -263,12 +263,22 @@ async def api_login(login_in: LoginRequest, db: AsyncSession = Depends(get_db)):
             "profile_picture_url": user.profile_picture_url,
             "map_style": user.map_style or "osm",
             "map_selected_icon_size": user.map_selected_icon_size or 48,
-            "map_unselected_icon_size": user.map_unselected_icon_size or 36
+            "map_unselected_icon_size": user.map_unselected_icon_size or 36,
+            "share_location": user.share_location if user.share_location is not None else True,
+            "save_location_history": user.save_location_history if user.save_location_history is not None else True,
+            "history_retention": user.history_retention or "30d",
+            "location_update_frequency": user.location_update_frequency or "realtime",
+            "notify_push": user.notify_push if user.notify_push is not None else True,
+            "notify_arrival_departure": user.notify_arrival_departure if user.notify_arrival_departure is not None else True,
+            "notify_stop_sharing": user.notify_stop_sharing if user.notify_stop_sharing is not None else True,
+            "notify_low_battery": user.notify_low_battery if user.notify_low_battery is not None else True,
+            "notify_device_offline": user.notify_device_offline if user.notify_device_offline is not None else True
         }
     }
 
 
 from app.api.deps import require_authenticated_user
+from app.services.telemetry_service import cleanup_history_for_user
 
 @router.get("/api/auth/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(require_authenticated_user)):
@@ -284,6 +294,38 @@ async def update_profile(
         current_user.avatar_color = profile_in.avatar_color
     if profile_in.display_name is not None:
         current_user.display_name = profile_in.display_name
+    if profile_in.share_location is not None:
+        current_user.share_location = bool(profile_in.share_location)
+    if profile_in.save_location_history is not None:
+        current_user.save_location_history = bool(profile_in.save_location_history)
+    if profile_in.history_retention is not None:
+        allowed_retentions = {"7d", "30d", "90d", "1y", "forever"}
+        if profile_in.history_retention in allowed_retentions:
+            current_user.history_retention = profile_in.history_retention
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid history_retention value. Must be one of {allowed_retentions}"
+            )
+    if profile_in.location_update_frequency is not None:
+        allowed_frequencies = {"realtime", "1m", "5m", "15m"}
+        if profile_in.location_update_frequency in allowed_frequencies:
+            current_user.location_update_frequency = profile_in.location_update_frequency
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid location_update_frequency value. Must be one of {allowed_frequencies}"
+            )
+    if profile_in.notify_push is not None:
+        current_user.notify_push = bool(profile_in.notify_push)
+    if profile_in.notify_arrival_departure is not None:
+        current_user.notify_arrival_departure = bool(profile_in.notify_arrival_departure)
+    if profile_in.notify_stop_sharing is not None:
+        current_user.notify_stop_sharing = bool(profile_in.notify_stop_sharing)
+    if profile_in.notify_low_battery is not None:
+        current_user.notify_low_battery = bool(profile_in.notify_low_battery)
+    if profile_in.notify_device_offline is not None:
+        current_user.notify_device_offline = bool(profile_in.notify_device_offline)
     if profile_in.map_style is not None:
         allowed_styles = {"osm", "openfree_positron", "openfree_bright", "openfree_liberty", "openfree_dark", "openfree_fiord", "carto_voyager", "carto_positron", "carto_dark"}
         if profile_in.map_style in allowed_styles:
@@ -312,6 +354,10 @@ async def update_profile(
     db.add(current_user)
     await db.commit()
     await db.refresh(current_user)
+
+    if profile_in.history_retention is not None:
+        await cleanup_history_for_user(db, current_user.id, current_user.history_retention)
+
     return current_user
 
 

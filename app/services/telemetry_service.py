@@ -1,10 +1,10 @@
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.db.models import Device, LocationHistory, SensorRegistration
+from app.db.models import Device, LocationHistory, SensorRegistration, User
 from app.schemas.telemetry import LocationUpdateData, SensorRegistrationData, SensorStateUpdate
 from app.services.state_service import StateService
 
@@ -28,6 +28,42 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
     return R * c
 
+def get_retention_cutoff(retention: Optional[str]) -> Optional[datetime]:
+    if not retention or retention == "forever":
+        return None
+    days_map = {
+        "7d": 7,
+        "30d": 30,
+        "90d": 90,
+        "1y": 365,
+    }
+    days = days_map.get(retention)
+    if days is None:
+        return None
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+async def cleanup_history_for_user(
+    db: AsyncSession,
+    user_id: int,
+    retention: Optional[str] = None
+) -> int:
+    """
+    Purges LocationHistory records for user_id older than the retention cutoff.
+    Returns the number of deleted records.
+    """
+    if not retention or retention == "forever":
+        return 0
+    cutoff = get_retention_cutoff(retention)
+    if cutoff is None:
+        return 0
+    stmt = delete(LocationHistory).where(
+        LocationHistory.user_id == user_id,
+        LocationHistory.timestamp < cutoff
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+    return getattr(result, "rowcount", 0)
+
 class TelemetryService:
     @staticmethod
     async def process_location_update(
@@ -41,21 +77,38 @@ class TelemetryService:
 
         now = datetime.now(timezone.utc)
 
-        # 1. Log Location History
-        loc_history = LocationHistory(
-            device_id=device.id,
-            user_id=device.user_id,
-            latitude=data.latitude,
-            longitude=data.longitude,
-            accuracy=data.gps_accuracy,
-            altitude=data.altitude,
-            speed=data.speed,
-            bearing=data.bearing,
-            timestamp=now,
-            trigger=data.trigger
-        )
-        db.add(loc_history)
-        await db.commit()
+        # 1. Log Location History (if enabled for user)
+        should_save_history = True
+        user_retention = "30d"
+        if device.user_id:
+            stmt_user = select(User.save_location_history, User.history_retention).where(User.id == device.user_id)
+            res_user = await db.execute(stmt_user)
+            row = res_user.first()
+            if row:
+                if row[0] is False:
+                    should_save_history = False
+                if row[1]:
+                    user_retention = row[1]
+
+        if should_save_history:
+            loc_history = LocationHistory(
+                device_id=device.id,
+                user_id=device.user_id,
+                latitude=data.latitude,
+                longitude=data.longitude,
+                accuracy=data.gps_accuracy,
+                altitude=data.altitude,
+                speed=data.speed,
+                bearing=data.bearing,
+                timestamp=now,
+                trigger=data.trigger
+            )
+            db.add(loc_history)
+            await db.commit()
+
+        # Prune old location history according to user's history_retention
+        if device.user_id:
+            await cleanup_history_for_user(db, device.user_id, user_retention)
 
         # 2. Update Device Tracker Entity State
         entity_name = slugify(device.device_name)
