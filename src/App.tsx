@@ -24,6 +24,207 @@ import { PreviewTestState, processPreviewTestMembers } from "./lib/previewTestMo
 import { PreviewTestModeControls } from "./components/PreviewTestModeControls";
 import { getAvatarColor } from "./lib/avatarColor";
 
+// Helper to dispatch messages to Android Companion App (V2 and V1) and iOS External Bus
+export const notifyExternalBus = (type: string, payload?: any, id?: number) => {
+  const msg: any = { type };
+  if (payload !== undefined) msg.payload = payload;
+  if (id !== undefined) msg.id = id;
+  const msgStr = JSON.stringify(msg);
+
+  try {
+    const extAppV2 = (window as any).externalAppV2;
+    if (extAppV2 && typeof extAppV2.postMessage === "function") {
+      extAppV2.postMessage(msgStr);
+    }
+  } catch (err) {
+    console.warn("[ExternalBus] externalAppV2 postMessage error:", err);
+  }
+
+  try {
+    const extApp = (window as any).externalApp;
+    if (extApp && typeof extApp.externalBus === "function") {
+      extApp.externalBus(msgStr);
+    } else if (extApp && typeof extApp.postMessage === "function") {
+      extApp.postMessage(msgStr);
+    }
+  } catch (err) {
+    console.warn("[ExternalBus] externalApp notify error:", err);
+  }
+
+  try {
+    const webkit = (window as any).webkit;
+    if (webkit?.messageHandlers?.externalBus?.postMessage) {
+      webkit.messageHandlers.externalBus.postMessage(msgStr);
+    }
+  } catch (err) {
+    console.warn("[ExternalBus] webkit externalBus postMessage error:", err);
+  }
+};
+
+// Helper to notify native app when revoking external auth
+export const revokeExternalAuth = () => {
+  try {
+    (window as any).externalAuthRevokeToken = (success: boolean) => {
+      console.log("[ExternalAuth] Token revoked on native app:", success);
+    };
+
+    const extAppV2 = (window as any).externalAppV2;
+    if (extAppV2 && typeof extAppV2.postMessage === "function") {
+      extAppV2.postMessage(
+        JSON.stringify({
+          type: "revokeExternalAuth",
+          payload: { callback: "externalAuthRevokeToken" }
+        })
+      );
+    }
+
+    const extApp = (window as any).externalApp;
+    if (extApp && typeof extApp.revokeExternalAuth === "function") {
+      try {
+        extApp.revokeExternalAuth(JSON.stringify({ callback: "externalAuthRevokeToken" }));
+      } catch {
+        extApp.revokeExternalAuth({ callback: "externalAuthRevokeToken" });
+      }
+    }
+  } catch (e) {
+    console.warn("[ExternalAuth] Error revoking external auth:", e);
+  }
+};
+
+// Helper to request External Auth token from official Home Assistant Companion App
+export const requestExternalAuthToken = (): Promise<string | null> => {
+  return new Promise<string | null>((resolve) => {
+    let resolved = false;
+    let pollTimer: any = null;
+
+    const cleanup = () => {
+      if (pollTimer) clearInterval(pollTimer);
+    };
+
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        console.warn("[ExternalAuth] Timeout waiting for native externalApp response.");
+        resolve(null);
+      }
+    }, 4500);
+
+    // Official Home Assistant callback name expected and validated by Android Companion App
+    (window as any).externalAuthSetToken = (success: boolean, data?: { access_token?: string; expires_in?: number }) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
+      cleanup();
+      if (success && data?.access_token) {
+        console.log("[ExternalAuth] Token received from Companion App externalApp bridge.");
+        resolve(data.access_token);
+      } else {
+        console.warn("[ExternalAuth] externalApp returned failure or no access_token:", data);
+        resolve(null);
+      }
+    };
+
+    const attemptSendRequest = (): boolean => {
+      // 1. Android V2 (WebMessageListener) - postMessage with getExternalAuth payload
+      const extAppV2 = (window as any).externalAppV2;
+      if (extAppV2 && typeof extAppV2.postMessage === "function") {
+        try {
+          console.log("[ExternalAuth] Requesting token via window.externalAppV2.postMessage");
+          extAppV2.postMessage(
+            JSON.stringify({
+              type: "getExternalAuth",
+              payload: {
+                callback: "externalAuthSetToken",
+                force: false
+              }
+            })
+          );
+          return true;
+        } catch (e) {
+          console.warn("[ExternalAuth] Error calling externalAppV2.postMessage:", e);
+        }
+      }
+
+      // 2. Android V1 / JavascriptInterface - getExternalAuth method
+      const extApp = (window as any).externalApp;
+      if (extApp) {
+        if (typeof extApp.getExternalAuth === "function") {
+          try {
+            console.log("[ExternalAuth] Requesting token via window.externalApp.getExternalAuth");
+            try {
+              extApp.getExternalAuth(
+                JSON.stringify({
+                  callback: "externalAuthSetToken",
+                  force: false
+                })
+              );
+            } catch {
+              extApp.getExternalAuth({
+                callback: "externalAuthSetToken",
+                force: false
+              });
+            }
+            return true;
+          } catch (e) {
+            console.warn("[ExternalAuth] Error calling externalApp.getExternalAuth:", e);
+          }
+        } else if (typeof extApp.postMessage === "function") {
+          try {
+            extApp.postMessage(
+              JSON.stringify({
+                type: "getExternalAuth",
+                payload: {
+                  callback: "externalAuthSetToken",
+                  force: false
+                }
+              })
+            );
+            return true;
+          } catch (e) {
+            console.warn("[ExternalAuth] Error calling extApp.postMessage:", e);
+          }
+        }
+      }
+
+      // 3. iOS WebKit message handlers
+      const webkit = (window as any).webkit;
+      if (webkit?.messageHandlers?.getExternalAuth?.postMessage) {
+        try {
+          console.log("[ExternalAuth] Requesting token via webkit.messageHandlers.getExternalAuth");
+          webkit.messageHandlers.getExternalAuth.postMessage({
+            callback: "externalAuthSetToken",
+            force: false
+          });
+          return true;
+        } catch (e) {
+          console.warn("[ExternalAuth] Error calling webkit messageHandler:", e);
+        }
+      }
+
+      return false;
+    };
+
+    // Try immediately
+    if (attemptSendRequest()) {
+      return;
+    }
+
+    // If not immediately available (e.g. injected shortly after DOM eval), poll briefly
+    let pollCount = 0;
+    pollTimer = setInterval(() => {
+      pollCount++;
+      if (resolved) {
+        cleanup();
+        return;
+      }
+      if (attemptSendRequest() || pollCount > 30) {
+        cleanup();
+      }
+    }, 80);
+  });
+};
+
 export default function App() {
   const [status, setStatus] = useState<"checking" | "setup" | "login" | "authenticated" | "register">("checking");
   const [username, setUsername] = useState("");
@@ -52,6 +253,9 @@ export default function App() {
   // Circles States
   const [circles, setCircles] = useState<Circle[]>([]);
   const [selectedCircle, setSelectedCircle] = useState<Circle | null>(null);
+  const selectedCircleRef = useRef<Circle | null>(null);
+  selectedCircleRef.current = selectedCircle;
+
   const [circleMembers, setCircleMembers] = useState<CircleMember[]>([]);
   const [circlesLoading, setCirclesLoading] = useState(false);
 
@@ -158,6 +362,115 @@ export default function App() {
     }
   }, []);
 
+  // Setup External Bus listener from native app
+  useEffect(() => {
+    (window as any).externalBus = (msgStr: string | any) => {
+      try {
+        const msg = typeof msgStr === "string" ? JSON.parse(msgStr) : msgStr;
+        console.log("[ExternalBus] Incoming message from native app:", msg);
+        if (msg?.type === "config/get") {
+          notifyExternalBus("config/get", {
+            result: {
+              ha_version: "2026.9.1",
+              location_name: "Yimly Home"
+            }
+          });
+        }
+      } catch (err) {
+        console.warn("[ExternalBus] Error handling incoming external bus message:", err);
+      }
+    };
+  }, []);
+
+  // Live WebSocket Connection to Home Assistant backend
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    const token = localStorage.getItem("access_token");
+    if (!token) return;
+
+    let isSubscribed = true;
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: any = null;
+
+    const connectWebSocket = () => {
+      if (!isSubscribed) return;
+
+      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${wsProtocol}//${window.location.host}/api/websocket`;
+
+      try {
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          console.log("[HA WebSocket] Connected to /api/websocket");
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+
+            if (data.type === "auth_required") {
+              // Complete handshake challenge with access token
+              ws?.send(JSON.stringify({ type: "auth", access_token: token }));
+            } else if (data.type === "auth_ok") {
+              console.log("[HA WebSocket] Auth successful (auth_ok). Notifying Companion App.");
+              // Notify Android / iOS Companion App via External Bus that frontend is connected
+              notifyExternalBus("connection-status", { event: "connected" });
+
+              // Subscribe to state change events for real-time live map updates
+              ws?.send(JSON.stringify({ id: 1, type: "subscribe_events", event_type: "state_changed" }));
+              ws?.send(JSON.stringify({ id: 2, type: "get_states" }));
+              ws?.send(JSON.stringify({ id: 3, type: "get_config" }));
+            } else if (data.type === "auth_invalid") {
+              console.warn("[HA WebSocket] Auth invalid.");
+              notifyExternalBus("connection-status", { event: "auth-invalid" });
+            } else if (data.type === "event" && data.event?.event_type === "state_changed") {
+              // Real-time entity state update received: silently refresh circle members & alerts
+              if (selectedCircleRef.current) {
+                fetchCircleMembers(selectedCircleRef.current.id, true);
+                fetchAlerts(selectedCircleRef.current.id, true);
+              }
+            }
+          } catch (err) {
+            console.warn("[HA WebSocket] Error parsing message:", err);
+          }
+        };
+
+        ws.onclose = () => {
+          console.log("[HA WebSocket] Connection closed.");
+          notifyExternalBus("connection-status", { event: "disconnected" });
+          if (isSubscribed) {
+            reconnectTimeout = setTimeout(connectWebSocket, 4000);
+          }
+        };
+
+        ws.onerror = (err) => {
+          console.warn("[HA WebSocket] Connection error:", err);
+          try {
+            ws?.close();
+          } catch {}
+        };
+      } catch (e) {
+        console.error("[HA WebSocket] Failed to create WebSocket:", e);
+        if (isSubscribed) {
+          reconnectTimeout = setTimeout(connectWebSocket, 5000);
+        }
+      }
+    };
+
+    connectWebSocket();
+
+    return () => {
+      isSubscribed = false;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (ws) {
+        try {
+          ws.close();
+        } catch {}
+      }
+    };
+  }, [status, fetchAlerts]);
+
   // Run on mount to check existing session, setup status, and register SW
   useEffect(() => {
     checkSessionAndSetup();
@@ -205,59 +518,15 @@ export default function App() {
 
     // 1. Check for Home Assistant Android Companion App external_auth bridge (?external_auth=1)
     const urlParams = new URLSearchParams(window.location.search);
-    const isExternalAuth = urlParams.get("external_auth") === "1";
+    const isExternalAuth =
+      urlParams.get("external_auth") === "1" ||
+      Boolean((window as any).externalAppV2) ||
+      Boolean((window as any).externalApp);
 
     if (isExternalAuth) {
-      console.log("[ExternalAuth] Detected ?external_auth=1 from Companion App WebView.");
+      console.log("[ExternalAuth] Detected Companion App WebView environment.");
       try {
-        const externalToken = await new Promise<string | null>((resolve) => {
-          let resolved = false;
-          const timeout = setTimeout(() => {
-            if (!resolved) {
-              resolved = true;
-              console.warn("[ExternalAuth] Timeout waiting for native externalApp response.");
-              resolve(null);
-            }
-          }, 4000);
-
-          const callbackName = "__externalAuthCallback_" + Math.random().toString(36).substring(2, 9);
-          (window as any)[callbackName] = (success: boolean, data?: any) => {
-            if (resolved) return;
-            resolved = true;
-            clearTimeout(timeout);
-            try {
-              delete (window as any)[callbackName];
-            } catch {}
-            if (success && data?.access_token) {
-              console.log("[ExternalAuth] Token received from Companion App externalApp bridge.");
-              resolve(data.access_token);
-            } else {
-              console.warn("[ExternalAuth] externalApp returned failure or no access_token:", data);
-              resolve(null);
-            }
-          };
-
-          const extApp = (window as any).externalAppV2 || (window as any).externalApp;
-          if (extApp && typeof extApp.getExternalAuth === "function") {
-            try {
-              // Android interface passes JSON string payload
-              extApp.getExternalAuth(JSON.stringify({ callback: callbackName, force: false }));
-            } catch (callErr) {
-              console.warn("[ExternalAuth] Error calling externalApp.getExternalAuth with string:", callErr);
-              try {
-                // Fallback for objects
-                extApp.getExternalAuth({ callback: callbackName, force: false });
-              } catch (e2) {
-                console.error("[ExternalAuth] Failed to invoke externalApp.getExternalAuth:", e2);
-                resolve(null);
-              }
-            }
-          } else {
-            console.log("[ExternalAuth] Native externalApp bridge object not present on window.");
-            resolve(null);
-          }
-        });
-
+        const externalToken = await requestExternalAuthToken();
         if (externalToken) {
           localStorage.setItem("access_token", externalToken);
         }

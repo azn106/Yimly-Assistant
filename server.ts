@@ -1169,6 +1169,8 @@ app.post("/api/circles", authenticateToken, (req: AuthRequest, res) => {
     const remaining = db.circle_members.filter((m) => m.circle_id === oldId);
     if (remaining.length === 0) {
       db.circles = db.circles.filter((c) => c.id !== oldId);
+      db.alerts = (db.alerts || []).filter((a) => a.circle_id !== oldId);
+      db.places = (db.places || []).filter((p) => p.circle_id !== oldId);
     }
   });
 

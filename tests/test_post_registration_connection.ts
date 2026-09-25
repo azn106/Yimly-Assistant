@@ -218,6 +218,17 @@ async function runPostRegistrationTestSuite() {
     });
   });
 
+  // 6. Test External Auth token validation with /api/auth/me
+  console.log("\n6. Testing token validation against /api/auth/me...");
+  const meRes = await makeRequest("GET", "/api/auth/me", undefined, token);
+  if (meRes.status !== 200) {
+    throw new Error(`/api/auth/me failed with status ${meRes.status}`);
+  }
+  if (meRes.data.username !== username) {
+    throw new Error(`Expected username ${username}, got ${meRes.data.username}`);
+  }
+  console.log(`✓ Token validated successfully for user: ${meRes.data.username}`);
+
   console.log("\n============================================================");
   console.log("ALL POST-REGISTRATION COMPANION APP TESTS PASSED! 🎉");
   console.log("============================================================\n");
