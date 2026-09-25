@@ -852,41 +852,58 @@ function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) 
 
 // OAuth 2.0 Authorization & Token Endpoints for Home Assistant Companion App
 app.get("/auth/authorize", (req, res) => {
-  const { client_id, redirect_uri, response_type, state } = req.query;
-  if (!client_id || !redirect_uri) {
-    return res.status(400).send("Missing required authorize parameters.");
-  }
+  const client_id = (req.query.client_id as string) || "https://home-assistant.io/android";
+  const redirect_uri = (req.query.redirect_uri as string) || "homeassistant://auth-callback";
+  const response_type = (req.query.response_type as string) || "code";
+  const state = (req.query.state as string) || "";
 
   const html = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Yimly Assistant - Authorize</title>
+  <title>Connect to Home Assistant</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; }
-    .card { background: #1e293b; padding: 2rem; border-radius: 1rem; width: 100%; max-width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
-    h1 { font-size: 1.5rem; margin-top: 0; text-align: center; }
-    label { display: block; font-size: 0.875rem; margin-bottom: 0.25rem; color: #94a3b8; }
-    input { width: 100%; box-sizing: border-box; padding: 0.75rem; margin-bottom: 1rem; border-radius: 0.5rem; border: 1px solid #334155; background: #0f172a; color: #fff; font-size: 1rem; }
-    button { width: 100%; padding: 0.75rem; border-radius: 0.5rem; border: none; background: #3b82f6; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
-    button:hover { background: #2563eb; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f5f7fa; color: #333333; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; }
+    .container { background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); width: 100%; max-width: 400px; padding: 32px; box-sizing: border-box; }
+    .header { text-align: center; margin-bottom: 24px; }
+    .logo { font-size: 32px; margin-bottom: 8px; display: inline-block; }
+    .title { font-size: 22px; font-weight: 600; margin: 0; color: #111111; }
+    .subtitle { font-size: 14px; color: #666666; margin: 4px 0 0 0; }
+    .form-group { margin-bottom: 20px; }
+    label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #444444; }
+    input[type="text"], input[type="password"] { width: 100%; padding: 12px; border: 1px solid #cccccc; border-radius: 6px; box-sizing: border-box; font-size: 15px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; }
+    input[type="text"]:focus, input[type="password"]:focus { border-color: #03a9f4; box-shadow: 0 0 0 3px rgba(3, 169, 244, 0.15); }
+    .btn { background-color: #03a9f4; color: #ffffff; border: none; border-radius: 6px; padding: 12px; font-size: 16px; font-weight: 600; width: 100%; cursor: pointer; transition: background-color 0.2s; }
+    .btn:hover { background-color: #0288d1; }
+    .footer { text-align: center; font-size: 12px; color: #888888; margin-top: 24px; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Connect to Yimly Assistant</h1>
+  <div class="container">
+    <div class="header">
+      <span class="logo">🏠</span>
+      <h1 class="title">Home Assistant</h1>
+      <p class="subtitle">Log in to authorize your companion app</p>
+    </div>
     <form method="POST" action="/auth/login_submit">
       <input type="hidden" name="client_id" value="${client_id}">
       <input type="hidden" name="redirect_uri" value="${redirect_uri}">
-      <input type="hidden" name="response_type" value="${response_type || "code"}">
-      <input type="hidden" name="state" value="${state || ""}">
-      <label>Username</label>
-      <input type="text" name="username" required autofocus autocomplete="username">
-      <label>Password</label>
-      <input type="password" name="password" required autocomplete="current-password">
-      <button type="submit">Log In & Authorize</button>
+      <input type="hidden" name="response_type" value="${response_type}">
+      <input type="hidden" name="state" value="${state}">
+      <div class="form-group">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required autofocus autocomplete="username" placeholder="Enter your username">
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="Enter your password">
+      </div>
+      <button type="submit" class="btn">Log In & Authorize</button>
     </form>
+    <div class="footer">
+      Connecting to ${client_id}
+    </div>
   </div>
 </body>
 </html>`;
@@ -896,8 +913,13 @@ app.get("/auth/authorize", (req, res) => {
 });
 
 app.post("/auth/login_submit", (req, res) => {
-  const { username, password, client_id, redirect_uri, state } = req.body;
-  if (!username || !password || !client_id || !redirect_uri) {
+  const username = req.body.username;
+  const password = req.body.password;
+  const client_id = req.body.client_id || "https://home-assistant.io/android";
+  const redirect_uri = req.body.redirect_uri || "homeassistant://auth-callback";
+  const state = req.body.state || "";
+
+  if (!username || !password) {
     return res.status(400).send("Missing required parameters.");
   }
 
@@ -1000,7 +1022,10 @@ app.post("/auth/token", (req, res) => {
 // System / Setup status endpoints
 app.get("/api/setup/status", (req, res) => {
   db = loadDB();
-  res.json({ is_initialized: db.users.length > 0 });
+  res.json({
+    is_initialized: db.users.length > 0,
+    needs_setup: db.users.length === 0
+  });
 });
 
 // Home Assistant Core discovery and services endpoints

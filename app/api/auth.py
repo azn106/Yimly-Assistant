@@ -29,25 +29,21 @@ class LoginRequest(BaseModel):
 @router.get("/auth/authorize", response_class=HTMLResponse)
 async def authorize_get(
     request: Request,
-    client_id: str,
-    redirect_uri: str,
-    response_type: str,
+    client_id: Optional[str] = "https://home-assistant.io/android",
+    redirect_uri: Optional[str] = "homeassistant://auth-callback",
+    response_type: Optional[str] = "code",
     state: Optional[str] = None,
     scope: Optional[str] = None
 ) -> HTMLResponse:
-    # Validate parameters
-    if not client_id or not redirect_uri:
-        raise HTTPException(status_code=400, detail="Missing required authorize parameters.")
-
     # Render login form preserving original state parameters
     return templates.TemplateResponse(
         request=request,
         name="login.html",
         context={
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": response_type,
-            "state": state,
+            "client_id": client_id or "https://home-assistant.io/android",
+            "redirect_uri": redirect_uri or "homeassistant://auth-callback",
+            "response_type": response_type or "code",
+            "state": state or "",
             "error": None
         }
     )
@@ -58,12 +54,16 @@ async def authorize_post(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
-    client_id: str = Form(...),
-    redirect_uri: str = Form(...),
-    response_type: str = Form(...),
+    client_id: Optional[str] = Form("https://home-assistant.io/android"),
+    redirect_uri: Optional[str] = Form("homeassistant://auth-callback"),
+    response_type: Optional[str] = Form("code"),
     state: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db)
 ):
+    actual_client_id = client_id or "https://home-assistant.io/android"
+    actual_redirect_uri = redirect_uri or "homeassistant://auth-callback"
+    actual_response_type = response_type or "code"
+
     # Authenticate credentials
     user = await AuthService.authenticate_user(db, username, password)
     if not user:
@@ -72,10 +72,10 @@ async def authorize_post(
             request=request,
             name="login.html",
             context={
-                "client_id": client_id,
-                "redirect_uri": redirect_uri,
-                "response_type": response_type,
-                "state": state,
+                "client_id": actual_client_id,
+                "redirect_uri": actual_redirect_uri,
+                "response_type": actual_response_type,
+                "state": state or "",
                 "error": "Invalid username or password"
             }
         )
@@ -85,16 +85,16 @@ async def authorize_post(
         code = await TokenService.create_authorization_code(
             db=db,
             user_id=user.id,
-            client_id=client_id,
-            redirect_uri=redirect_uri
+            client_id=actual_client_id,
+            redirect_uri=actual_redirect_uri
         )
     except Exception as e:
         logger.error(f"Failed to generate auth code: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
     # Redirect client/webview to the provided Redirect URI with parameters
-    separator = "&" if "?" in redirect_uri else "?"
-    redirect_url = f"{redirect_uri}{separator}code={code}"
+    separator = "&" if "?" in actual_redirect_uri else "?"
+    redirect_url = f"{actual_redirect_uri}{separator}code={code}"
 
     if state:
         redirect_url += f"&state={state}"

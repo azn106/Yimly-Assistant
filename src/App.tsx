@@ -516,15 +516,27 @@ export default function App() {
     setStatus("checking");
     setError(null);
 
-    // 1. Check for Home Assistant Android Companion App external_auth bridge (?external_auth=1)
+    // 1. Check and preserve Home Assistant Companion App external_auth context throughout session
     const urlParams = new URLSearchParams(window.location.search);
-    const isExternalAuth =
-      urlParams.get("external_auth") === "1" ||
-      Boolean((window as any).externalAppV2) ||
-      Boolean((window as any).externalApp);
+    const isExternalAuthParam = urlParams.get("external_auth") === "1";
+    const hasNativeBridge = Boolean((window as any).externalAppV2) || Boolean((window as any).externalApp);
+    const storedExternalAuth =
+      sessionStorage.getItem("external_auth") === "1" ||
+      localStorage.getItem("external_auth") === "1";
+
+    const isExternalAuth = isExternalAuthParam || hasNativeBridge || storedExternalAuth;
 
     if (isExternalAuth) {
-      console.log("[ExternalAuth] Detected Companion App WebView environment.");
+      sessionStorage.setItem("external_auth", "1");
+      localStorage.setItem("external_auth", "1");
+      console.log("[ExternalAuth] Detected and preserved Companion App WebView environment.");
+
+      if (urlParams.get("client_id") || urlParams.get("redirect_uri")) {
+        const authUrl = `/auth/authorize?${urlParams.toString()}`;
+        sessionStorage.setItem("companion_auth_url", authUrl);
+        localStorage.setItem("companion_auth_url", authUrl);
+      }
+
       try {
         const externalToken = await requestExternalAuthToken();
         if (externalToken) {
@@ -559,6 +571,21 @@ export default function App() {
       } catch (err) {
         console.error("Error validating session:", err);
       }
+    }
+
+    // If this session originated from the Companion App / external-auth flow without a valid token,
+    // redirect to the dedicated Companion login page (/auth/authorize)
+    if (isExternalAuth) {
+      const preservedAuthUrl =
+        sessionStorage.getItem("companion_auth_url") ||
+        localStorage.getItem("companion_auth_url") ||
+        "/auth/authorize";
+      sessionStorage.removeItem("external_auth");
+      localStorage.removeItem("external_auth");
+      sessionStorage.removeItem("companion_auth_url");
+      localStorage.removeItem("companion_auth_url");
+      window.location.href = preservedAuthUrl;
+      return;
     }
 
     try {
@@ -855,13 +882,50 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    const isCompanionSession =
+      sessionStorage.getItem("external_auth") === "1" ||
+      localStorage.getItem("external_auth") === "1" ||
+      Boolean((window as any).externalAppV2) ||
+      Boolean((window as any).externalApp) ||
+      new URLSearchParams(window.location.search).get("external_auth") === "1";
+
+    // 1. Notify native app bridge to revoke external token if available
+    if (isCompanionSession) {
+      try {
+        revokeExternalAuth();
+      } catch (e) {
+        console.warn("[ExternalAuth] Error revoking external auth on logout:", e);
+      }
+    }
+
+    // 2. Clean up authentication tokens and session caches
     localStorage.removeItem("access_token");
     localStorage.removeItem("user_info");
+    sessionStorage.removeItem("access_token");
+    sessionStorage.removeItem("user_info");
+
     setUser(null);
     setCircles([]);
     setSelectedCircle(null);
     setCircleMembers([]);
-    setStatus("login");
+
+    // 3. Route according to session origin
+    if (isCompanionSession) {
+      const preservedAuthUrl =
+        sessionStorage.getItem("companion_auth_url") ||
+        localStorage.getItem("companion_auth_url") ||
+        "/auth/authorize";
+
+      // Clear flags before redirect
+      sessionStorage.removeItem("external_auth");
+      localStorage.removeItem("external_auth");
+      sessionStorage.removeItem("companion_auth_url");
+      localStorage.removeItem("companion_auth_url");
+
+      window.location.href = preservedAuthUrl;
+    } else {
+      setStatus("login");
+    }
   };
 
   return (
