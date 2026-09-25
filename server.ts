@@ -549,6 +549,20 @@ let db = loadDB();
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// OAuth State Store for Preview
+interface AuthCodeRecord {
+  code: string;
+  user_id: number;
+  client_id: string;
+  redirect_uri: string;
+  expires_at: number;
+  used: boolean;
+}
+
+const authCodesStore: AuthCodeRecord[] = [];
+const refreshTokensStore: { token: string; user_id: number; client_id: string; expires_at: number; revoked: boolean }[] = [];
 
 const uploadsDir = path.join(process.cwd(), "uploads");
 const profilePicsDir = path.join(uploadsDir, "profile_pictures");
@@ -732,6 +746,153 @@ function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) 
     return res.status(401).json({ detail: "Invalid or expired token" });
   }
 }
+
+// OAuth 2.0 Authorization & Token Endpoints for Home Assistant Companion App
+app.get("/auth/authorize", (req, res) => {
+  const { client_id, redirect_uri, response_type, state } = req.query;
+  if (!client_id || !redirect_uri) {
+    return res.status(400).send("Missing required authorize parameters.");
+  }
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Yimly Assistant - Authorize</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; }
+    .card { background: #1e293b; padding: 2rem; border-radius: 1rem; width: 100%; max-width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+    h1 { font-size: 1.5rem; margin-top: 0; text-align: center; }
+    label { display: block; font-size: 0.875rem; margin-bottom: 0.25rem; color: #94a3b8; }
+    input { width: 100%; box-sizing: border-box; padding: 0.75rem; margin-bottom: 1rem; border-radius: 0.5rem; border: 1px solid #334155; background: #0f172a; color: #fff; font-size: 1rem; }
+    button { width: 100%; padding: 0.75rem; border-radius: 0.5rem; border: none; background: #3b82f6; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
+    button:hover { background: #2563eb; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Connect to Yimly Assistant</h1>
+    <form method="POST" action="/auth/login_submit">
+      <input type="hidden" name="client_id" value="${client_id}">
+      <input type="hidden" name="redirect_uri" value="${redirect_uri}">
+      <input type="hidden" name="response_type" value="${response_type || "code"}">
+      <input type="hidden" name="state" value="${state || ""}">
+      <label>Username</label>
+      <input type="text" name="username" required autofocus autocomplete="username">
+      <label>Password</label>
+      <input type="password" name="password" required autocomplete="current-password">
+      <button type="submit">Log In & Authorize</button>
+    </form>
+  </div>
+</body>
+</html>`;
+
+  res.setHeader("Content-Type", "text/html");
+  res.send(html);
+});
+
+app.post("/auth/login_submit", (req, res) => {
+  const { username, password, client_id, redirect_uri, state } = req.body;
+  if (!username || !password || !client_id || !redirect_uri) {
+    return res.status(400).send("Missing required parameters.");
+  }
+
+  db = loadDB();
+  const found = db.users.find((u) => u.username.toLowerCase() === username.toLowerCase());
+  if (!found || !bcrypt.compareSync(password, found.password_hash)) {
+    return res.status(401).send("Invalid username or password.");
+  }
+
+  const code = crypto.randomBytes(32).toString("hex");
+  const expires_at = Date.now() + 5 * 60 * 1000; // 5 minutes
+
+  authCodesStore.push({
+    code,
+    user_id: found.id,
+    client_id,
+    redirect_uri,
+    expires_at,
+    used: false
+  });
+
+  const sep = redirect_uri.includes("?") ? "&" : "?";
+  let redirectUrl = `${redirect_uri}${sep}code=${code}`;
+  if (state) {
+    redirectUrl += `&state=${encodeURIComponent(state)}`;
+  }
+
+  res.redirect(302, redirectUrl);
+});
+
+app.post("/auth/token", (req, res) => {
+  const { grant_type, client_id, code, redirect_uri, refresh_token } = req.body;
+
+  if (grant_type === "authorization_code") {
+    if (!code || !client_id) {
+      return res.status(400).json({ detail: "Code and client_id are required for authorization_code grant." });
+    }
+
+    const authCode = authCodesStore.find(
+      (ac) => ac.code === code && ac.client_id === client_id
+    );
+
+    if (!authCode) {
+      return res.status(400).json({ detail: "Invalid authorization code or client_id." });
+    }
+
+    if (redirect_uri && authCode.redirect_uri !== redirect_uri) {
+      return res.status(400).json({ detail: "Mismatched redirect_uri." });
+    }
+
+    if (authCode.used || authCode.expires_at < Date.now()) {
+      return res.status(400).json({ detail: "Authorization code has already been used or has expired." });
+    }
+
+    // Mark used atomically
+    authCode.used = true;
+
+    const access_token = jwt.sign({ sub: String(authCode.user_id), typ: "access" }, JWT_SECRET, { expiresIn: "30d" });
+    const new_refresh_token = crypto.randomBytes(32).toString("hex");
+
+    refreshTokensStore.push({
+      token: new_refresh_token,
+      user_id: authCode.user_id,
+      client_id,
+      expires_at: Date.now() + 90 * 86400000,
+      revoked: false
+    });
+
+    return res.json({
+      access_token,
+      token_type: "Bearer",
+      expires_in: 1800,
+      refresh_token: new_refresh_token
+    });
+  } else if (grant_type === "refresh_token") {
+    if (!refresh_token || !client_id) {
+      return res.status(400).json({ detail: "refresh_token and client_id are required." });
+    }
+
+    const ref = refreshTokensStore.find(
+      (r) => r.token === refresh_token && r.client_id === client_id && !r.revoked && r.expires_at > Date.now()
+    );
+
+    if (!ref) {
+      return res.status(400).json({ detail: "Invalid or expired refresh token." });
+    }
+
+    const access_token = jwt.sign({ sub: String(ref.user_id), typ: "access" }, JWT_SECRET, { expiresIn: "30d" });
+    return res.json({
+      access_token,
+      token_type: "Bearer",
+      expires_in: 1800,
+      refresh_token
+    });
+  } else {
+    return res.status(400).json({ detail: "Unsupported grant_type." });
+  }
+});
 
 // System / Setup status endpoints
 app.get("/api/setup/status", (req, res) => {
@@ -1184,6 +1345,8 @@ app.post("/api/circles", authenticateToken, (req: AuthRequest, res) => {
 
   db.circles.push(newCircle);
   db.circle_members.push({ circle_id: newCircle.id, user_id: userId });
+  db.alerts = (db.alerts || []).filter((a) => a.circle_id !== newCircle.id);
+  db.places = (db.places || []).filter((p) => p.circle_id !== newCircle.id);
   saveDB(db);
 
   res.json(newCircle);

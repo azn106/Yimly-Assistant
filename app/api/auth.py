@@ -113,13 +113,13 @@ async def exchange_token(
     db: AsyncSession = Depends(get_db)
 ):
     if grant_type == "authorization_code":
-        if not code or not redirect_uri:
+        if not code:
             raise HTTPException(
                 status_code=400,
-                detail="Code and redirect_uri are required for authorization_code grant."
+                detail="Code is required for authorization_code grant."
             )
 
-        # Validate code atomically
+        # Validate code atomically (redirect_uri verified if provided)
         user_id = await TokenService.redeem_authorization_code(
             db=db,
             raw_code=code,

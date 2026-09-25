@@ -40,18 +40,21 @@ class TokenService:
         db: AsyncSession,
         raw_code: str,
         client_id: str,
-        redirect_uri: str
+        redirect_uri: Optional[str] = None
     ) -> Optional[int]:
         code_hash = TokenService.hash_value(raw_code)
         stmt = select(AuthorizationCode).where(
             AuthorizationCode.code_hash == code_hash,
-            AuthorizationCode.client_id == client_id,
-            AuthorizationCode.redirect_uri == redirect_uri
+            AuthorizationCode.client_id == client_id
         )
         result = await db.execute(stmt)
         auth_code = result.scalar_one_or_none()
 
         if not auth_code:
+            return None
+
+        # If redirect_uri is provided by the client, enforce exact match with the authorized redirect_uri
+        if redirect_uri is not None and auth_code.redirect_uri != redirect_uri:
             return None
 
         # Expired or already used

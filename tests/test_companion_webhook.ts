@@ -82,17 +82,84 @@ async function runCompanionWebhookTestSuite() {
   }
   console.log("✓ GET /auth/authorize returns 200 OK.");
 
-  // 3. User Login via Login Flow
-  console.log("\n3. Testing Login submission & Code issuance...");
-  const loginRes = await makeRequest("POST", "/api/auth/login", {
+  // 3. User Login via Official Companion App OAuth Flow
+  console.log("\n3. Testing Login submission & Code issuance via /auth/login_submit...");
+  const loginSubmitPayload = new URLSearchParams({
     username,
-    password
+    password,
+    client_id: "https://home-assistant.io/android",
+    redirect_uri: "homeassistant://auth-callback",
+    response_type: "code",
+    state: "test_state_12345"
+  }).toString();
+
+  const submitRes = await makeRequest("POST", "/auth/login_submit", loginSubmitPayload, undefined, {
+    "Content-Type": "application/x-www-form-urlencoded"
   });
-  if (loginRes.status !== 200) {
-    throw new Error(`Login failed: ${JSON.stringify(loginRes.data)}`);
+
+  if (submitRes.status !== 302) {
+    throw new Error(`Expected 302 redirect from /auth/login_submit, got ${submitRes.status}`);
   }
-  const accessToken = loginRes.data.access_token;
-  console.log("✓ Login successful and token obtained.");
+
+  const redirectLocation = submitRes.headers["location"] as string;
+  if (!redirectLocation || !redirectLocation.includes("code=")) {
+    throw new Error(`Expected redirect location with code, got: ${redirectLocation}`);
+  }
+  console.log("✓ /auth/login_submit returned 302 with callback location.");
+
+  const authCode = new URL(redirectLocation).searchParams.get("code");
+  if (!authCode) {
+    throw new Error("Failed to extract authorization code from redirect URL");
+  }
+  console.log("✓ Extracted single-use auth code.");
+
+  // 3b. Test Token Exchange as sent by Official HA Companion App (without redirect_uri)
+  console.log("\n3b. Testing POST /auth/token (authorization_code grant)...");
+  const tokenExchangePayload = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: authCode,
+    client_id: "https://home-assistant.io/android"
+  }).toString();
+
+  const tokenRes = await makeRequest("POST", "/auth/token", tokenExchangePayload, undefined, {
+    "Content-Type": "application/x-www-form-urlencoded"
+  });
+
+  if (tokenRes.status !== 200) {
+    throw new Error(`Token exchange failed with status ${tokenRes.status}: ${JSON.stringify(tokenRes.data)}`);
+  }
+
+  const accessToken = tokenRes.data.access_token;
+  const refreshToken = tokenRes.data.refresh_token;
+  if (!accessToken || !refreshToken || tokenRes.data.token_type !== "Bearer") {
+    throw new Error(`Invalid token response: ${JSON.stringify(tokenRes.data)}`);
+  }
+  console.log("✓ /auth/token succeeded: access_token and refresh_token issued.");
+
+  // 3c. Verify Replay Prevention (Authorization code must be single-use)
+  console.log("\n3c. Testing replay attack prevention (code single-use)...");
+  const replayRes = await makeRequest("POST", "/auth/token", tokenExchangePayload, undefined, {
+    "Content-Type": "application/x-www-form-urlencoded"
+  });
+  if (replayRes.status !== 400) {
+    throw new Error(`Expected 400 for replayed code, got ${replayRes.status}`);
+  }
+  console.log("✓ Replayed authorization code safely rejected with HTTP 400.");
+
+  // 3d. Verify Refresh Token Exchange
+  console.log("\n3d. Testing refresh_token grant...");
+  const refreshExchangePayload = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    client_id: "https://home-assistant.io/android"
+  }).toString();
+  const refreshRes = await makeRequest("POST", "/auth/token", refreshExchangePayload, undefined, {
+    "Content-Type": "application/x-www-form-urlencoded"
+  });
+  if (refreshRes.status !== 200 || !refreshRes.data.access_token) {
+    throw new Error(`Expected 200 for refresh_token grant, got ${refreshRes.status}`);
+  }
+  console.log("✓ Refresh token exchange succeeded.");
 
   // 4. Companion App Registration
   console.log("\n4. Testing POST /api/mobile_app/registrations...");
