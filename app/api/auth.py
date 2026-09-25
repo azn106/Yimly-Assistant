@@ -20,9 +20,11 @@ from app.services.token_service import TokenService
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
+
 class LoginRequest(BaseModel):
     username: str
     password: str
+
 
 @router.get("/auth/authorize", response_class=HTMLResponse)
 async def authorize_get(
@@ -30,7 +32,7 @@ async def authorize_get(
     client_id: str,
     redirect_uri: str,
     response_type: str,
-    state: str,
+    state: Optional[str] = None,
     scope: Optional[str] = None
 ) -> HTMLResponse:
     # Validate parameters
@@ -50,6 +52,7 @@ async def authorize_get(
         }
     )
 
+
 @router.post("/auth/login_submit")
 async def authorize_post(
     request: Request,
@@ -58,7 +61,7 @@ async def authorize_post(
     client_id: str = Form(...),
     redirect_uri: str = Form(...),
     response_type: str = Form(...),
-    state: str = Form(...),
+    state: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db)
 ):
     # Authenticate credentials
@@ -91,9 +94,14 @@ async def authorize_post(
 
     # Redirect client/webview to the provided Redirect URI with parameters
     separator = "&" if "?" in redirect_uri else "?"
-    redirect_url = f"{redirect_uri}{separator}code={code}&state={state}"
+    redirect_url = f"{redirect_uri}{separator}code={code}"
+
+    if state:
+        redirect_url += f"&state={state}"
+
     logger.info(f"User {user.username} authenticated successfully. Redirecting to mobile-app callback.")
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
+
 
 @router.post("/auth/token")
 async def exchange_token(
@@ -106,7 +114,10 @@ async def exchange_token(
 ):
     if grant_type == "authorization_code":
         if not code or not redirect_uri:
-            raise HTTPException(status_code=400, detail="Code and redirect_uri are required for authorization_code grant.")
+            raise HTTPException(
+                status_code=400,
+                detail="Code and redirect_uri are required for authorization_code grant."
+            )
 
         # Validate code atomically
         user_id = await TokenService.redeem_authorization_code(
@@ -116,7 +127,10 @@ async def exchange_token(
             redirect_uri=redirect_uri
         )
         if user_id is None:
-            raise HTTPException(status_code=400, detail="Invalid, expired, or already used authorization code.")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid, expired, or already used authorization code."
+            )
 
         # Create JWT Access Token and Refresh Token
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -124,7 +138,7 @@ async def exchange_token(
             data={"sub": str(user_id), "typ": "access"},
             expires_delta=access_token_expires
         )
-        
+
         # Create persistent Refresh Token
         new_refresh_token = await TokenService.create_refresh_token(
             db=db,
@@ -142,7 +156,10 @@ async def exchange_token(
 
     elif grant_type == "refresh_token":
         if not refresh_token:
-            raise HTTPException(status_code=400, detail="refresh_token is required for refresh_token grant.")
+            raise HTTPException(
+                status_code=400,
+                detail="refresh_token is required for refresh_token grant."
+            )
 
         user_id = await TokenService.redeem_refresh_token(
             db=db,
@@ -150,9 +167,12 @@ async def exchange_token(
             client_id=client_id
         )
         if user_id is None:
-            raise HTTPException(status_code=400, detail="Invalid, revoked, or expired refresh token.")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid, revoked, or expired refresh token."
+            )
 
-        # Issue new Access Token (keep old refresh token active or rotate - we'll keep the same refresh token active)
+        # Issue new Access Token (keep old refresh token active)
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_jwt_token(
             data={"sub": str(user_id), "typ": "access"},
@@ -164,7 +184,7 @@ async def exchange_token(
             "access_token": access_token,
             "token_type": "Bearer",
             "expires_in": int(access_token_expires.total_seconds()),
-            "refresh_token": refresh_token  # Protocol accepts returning the same refresh token
+            "refresh_token": refresh_token
         }
 
     else:
@@ -186,6 +206,7 @@ async def setup_register(user_in: UserCreate, db: AsyncSession = Depends(get_db)
     stmt = select(func.count()).select_from(User)
     result = await db.execute(stmt)
     count = result.scalar()
+
     if count > 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -210,6 +231,7 @@ async def api_register(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
     stmt = select(func.count()).select_from(User)
     result = await db.execute(stmt)
     count = result.scalar()
+
     if count == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -231,6 +253,7 @@ async def api_register(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
 @router.post("/api/auth/login")
 async def api_login(login_in: LoginRequest, db: AsyncSession = Depends(get_db)):
     user = await AuthService.authenticate_user(db, login_in.username, login_in.password)
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -280,9 +303,11 @@ async def api_login(login_in: LoginRequest, db: AsyncSession = Depends(get_db)):
 from app.api.deps import require_authenticated_user
 from app.services.telemetry_service import cleanup_history_for_user
 
+
 @router.get("/api/auth/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(require_authenticated_user)):
     return current_user
+
 
 @router.put("/api/auth/profile", response_model=UserResponse)
 async def update_profile(
@@ -295,17 +320,22 @@ async def update_profile(
 
     if profile_in.avatar_color is not None:
         current_user.avatar_color = profile_in.avatar_color
+
     if profile_in.display_name is not None:
         current_user.display_name = profile_in.display_name
+
     if profile_in.share_location is not None:
         next_share = bool(profile_in.share_location)
         if previous_share is True and next_share is False:
             is_stop_sharing_transition = True
         current_user.share_location = next_share
+
     if profile_in.save_location_history is not None:
         current_user.save_location_history = bool(profile_in.save_location_history)
+
     if profile_in.history_retention is not None:
         allowed_retentions = {"7d", "30d", "90d", "1y", "forever"}
+
         if profile_in.history_retention in allowed_retentions:
             current_user.history_retention = profile_in.history_retention
         else:
@@ -313,8 +343,10 @@ async def update_profile(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid history_retention value. Must be one of {allowed_retentions}"
             )
+
     if profile_in.location_update_frequency is not None:
         allowed_frequencies = {"realtime", "1m", "5m", "15m"}
+
         if profile_in.location_update_frequency in allowed_frequencies:
             current_user.location_update_frequency = profile_in.location_update_frequency
         else:
@@ -322,18 +354,35 @@ async def update_profile(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid location_update_frequency value. Must be one of {allowed_frequencies}"
             )
+
     if profile_in.notify_push is not None:
         current_user.notify_push = bool(profile_in.notify_push)
+
     if profile_in.notify_arrival_departure is not None:
         current_user.notify_arrival_departure = bool(profile_in.notify_arrival_departure)
+
     if profile_in.notify_stop_sharing is not None:
         current_user.notify_stop_sharing = bool(profile_in.notify_stop_sharing)
+
     if profile_in.notify_low_battery is not None:
         current_user.notify_low_battery = bool(profile_in.notify_low_battery)
+
     if profile_in.notify_device_offline is not None:
         current_user.notify_device_offline = bool(profile_in.notify_device_offline)
+
     if profile_in.map_style is not None:
-        allowed_styles = {"osm", "openfree_positron", "openfree_bright", "openfree_liberty", "openfree_dark", "openfree_fiord", "carto_voyager", "carto_positron", "carto_dark"}
+        allowed_styles = {
+            "osm",
+            "openfree_positron",
+            "openfree_bright",
+            "openfree_liberty",
+            "openfree_dark",
+            "openfree_fiord",
+            "carto_voyager",
+            "carto_positron",
+            "carto_dark"
+        }
+
         if profile_in.map_style in allowed_styles:
             current_user.map_style = profile_in.map_style
         else:
@@ -341,6 +390,7 @@ async def update_profile(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid map_style value. Must be one of {allowed_styles}"
             )
+
     if profile_in.map_selected_icon_size is not None:
         if 24 <= profile_in.map_selected_icon_size <= 72:
             current_user.map_selected_icon_size = profile_in.map_selected_icon_size
@@ -349,6 +399,7 @@ async def update_profile(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="map_selected_icon_size must be between 24 and 72 pixels."
             )
+
     if profile_in.map_unselected_icon_size is not None:
         if 24 <= profile_in.map_unselected_icon_size <= 72:
             current_user.map_unselected_icon_size = profile_in.map_unselected_icon_size
@@ -357,6 +408,7 @@ async def update_profile(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="map_unselected_icon_size must be between 24 and 72 pixels."
             )
+
     db.add(current_user)
     await db.commit()
     await db.refresh(current_user)
@@ -366,12 +418,16 @@ async def update_profile(
         from app.schemas.alerts import AlertCreate
         from app.services.alert_service import AlertService
 
-        stmt_circle = select(CircleMember.circle_id).where(CircleMember.user_id == current_user.id)
+        stmt_circle = select(CircleMember.circle_id).where(
+            CircleMember.user_id == current_user.id
+        )
         res_circle = await db.execute(stmt_circle)
         circle_ids = res_circle.scalars().all()
 
         for circle_id in circle_ids:
-            stmt_members = select(UserModel).join(CircleMember).where(CircleMember.circle_id == circle_id)
+            stmt_members = select(UserModel).join(CircleMember).where(
+                CircleMember.circle_id == circle_id
+            )
             res_members = await db.execute(stmt_members)
             members = res_members.scalars().all()
 
@@ -383,7 +439,10 @@ async def update_profile(
                     continue
 
                 title = f"{current_user.display_name} stopped sharing location"
-                message = f"{current_user.display_name} has stopped sharing their location with the circle."
+                message = (
+                    f"{current_user.display_name} has stopped sharing "
+                    f"their location with the circle."
+                )
 
                 await AlertService.create_alert(
                     db=db,
@@ -398,7 +457,11 @@ async def update_profile(
                 )
 
     if profile_in.history_retention is not None:
-        await cleanup_history_for_user(db, current_user.id, current_user.history_retention)
+        await cleanup_history_for_user(
+            db,
+            current_user.id,
+            current_user.history_retention
+        )
 
     return current_user
 
@@ -412,18 +475,22 @@ async def upload_profile_picture(
 ):
     allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
     allowed_exts = [".jpg", ".jpeg", ".png", ".webp"]
-    
+
     filename_lower = file.filename.lower() if file.filename else ""
     ext = os.path.splitext(filename_lower)[1]
-    
-    if ext not in allowed_exts or (file.content_type and file.content_type.lower() not in allowed_types):
+
+    if ext not in allowed_exts or (
+        file.content_type
+        and file.content_type.lower() not in allowed_types
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid file type. Only JPEG, PNG, and WebP images are allowed."
         )
 
     contents = await file.read()
-    if len(contents) > 5 * 1024 * 1024: # 5MB limit
+
+    if len(contents) > 5 * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="File size exceeds maximum limit of 5MB."
@@ -431,10 +498,14 @@ async def upload_profile_picture(
 
     # Basic magic bytes check
     is_valid_magic = (
-        contents.startswith(b"\xff\xd8\xff") or # JPEG
-        contents.startswith(b"\x89PNG\r\n\x1a\n") or # PNG
-        (contents.startswith(b"RIFF") and b"WEBP" in contents[:16]) # WebP
+        contents.startswith(b"\xff\xd8\xff")
+        or contents.startswith(b"\x89PNG\r\n\x1a\n")
+        or (
+            contents.startswith(b"RIFF")
+            and b"WEBP" in contents[:16]
+        )
     )
+
     if not is_valid_magic:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -444,18 +515,37 @@ async def upload_profile_picture(
     # Remove existing photo if present
     if current_user.profile_picture_url:
         old_file_name = os.path.basename(current_user.profile_picture_url)
-        old_file_path = os.path.join(os.getcwd(), "uploads", "profile_pictures", old_file_name)
+        old_file_path = os.path.join(
+            os.getcwd(),
+            "uploads",
+            "profile_pictures",
+            old_file_name
+        )
+
         if os.path.exists(old_file_path):
             try:
                 os.remove(old_file_path)
             except Exception as e:
-                logger.warning(f"Failed to delete old profile picture {old_file_path}: {e}")
+                logger.warning(
+                    f"Failed to delete old profile picture "
+                    f"{old_file_path}: {e}"
+                )
 
     # Generate safe server-side filename
     safe_ext = ext if ext in allowed_exts else ".jpg"
-    unique_filename = f"user_{current_user.id}_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:8]}{safe_ext}"
-    upload_dir = os.path.join(os.getcwd(), "uploads", "profile_pictures")
+    unique_filename = (
+        f"user_{current_user.id}_"
+        f"{int(datetime.now(timezone.utc).timestamp())}_"
+        f"{uuid.uuid4().hex[:8]}{safe_ext}"
+    )
+
+    upload_dir = os.path.join(
+        os.getcwd(),
+        "uploads",
+        "profile_pictures"
+    )
     os.makedirs(upload_dir, exist_ok=True)
+
     target_path = os.path.join(upload_dir, unique_filename)
 
     with open(target_path, "wb") as f:
@@ -463,9 +553,11 @@ async def upload_profile_picture(
 
     picture_url = f"/uploads/profile_pictures/{unique_filename}"
     current_user.profile_picture_url = picture_url
+
     db.add(current_user)
     await db.commit()
     await db.refresh(current_user)
+
     return current_user
 
 
@@ -477,15 +569,26 @@ async def delete_profile_picture(
 ):
     if current_user.profile_picture_url:
         old_file_name = os.path.basename(current_user.profile_picture_url)
-        old_file_path = os.path.join(os.getcwd(), "uploads", "profile_pictures", old_file_name)
+        old_file_path = os.path.join(
+            os.getcwd(),
+            "uploads",
+            "profile_pictures",
+            old_file_name
+        )
+
         if os.path.exists(old_file_path):
             try:
                 os.remove(old_file_path)
             except Exception as e:
-                logger.warning(f"Failed to delete profile picture {old_file_path}: {e}")
+                logger.warning(
+                    f"Failed to delete old profile picture "
+                    f"{old_file_path}: {e}"
+                )
+
         current_user.profile_picture_url = None
+
         db.add(current_user)
         await db.commit()
         await db.refresh(current_user)
-    return current_user
 
+    return current_user

@@ -186,6 +186,7 @@ export interface YimlyPreviewDatabase {
   geofence_states: GeofenceStateData[];
   device_battery_states: DeviceBatteryStateData[];
   device_offline_states: DeviceOfflineStateData[];
+  devices: any[];
 }
 
 
@@ -489,7 +490,8 @@ function loadDB(): YimlyPreviewDatabase {
       alerts: [],
       geofence_states: [],
       device_battery_states: [],
-      device_offline_states: []
+      device_offline_states: [],
+      devices: []
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(initialDB, null, 2));
     return initialDB;
@@ -511,7 +513,8 @@ function loadDB(): YimlyPreviewDatabase {
       alerts: parsed.alerts || [],
       geofence_states: parsed.geofence_states || [],
       device_battery_states: parsed.device_battery_states || [],
-      device_offline_states: parsed.device_offline_states || []
+      device_offline_states: parsed.device_offline_states || [],
+      devices: parsed.devices || []
     };
 
     // If loaded history was empty or upgraded, persist it
@@ -531,7 +534,8 @@ function loadDB(): YimlyPreviewDatabase {
       alerts: [],
       geofence_states: [],
       device_battery_states: [],
-      device_offline_states: []
+      device_offline_states: [],
+      devices: []
     };
   }
 }
@@ -1992,17 +1996,122 @@ function checkOfflineDevicesPreview(): void {
   }
 }
 
-// Home Assistant Companion App Webhook & Telemetry Receiver
-app.post(["/api/webhook/:webhook_id", "/api/mobile_app/registrations"], (req, res) => {
-  const { type, data } = req.body;
+// Home Assistant Companion App Device Registration Endpoint
+app.post("/api/mobile_app/registrations", (req, res) => {
   db = loadDB();
+  db.devices = db.devices || [];
+  const webhookId = crypto.randomBytes(16).toString("hex");
+  const deviceData = {
+    id: Date.now(),
+    device_id: req.body.device_id || "device_unknown",
+    device_name: req.body.device_name || "Companion Phone",
+    app_version: req.body.app_version || "1.0.0",
+    webhook_id: webhookId
+  };
+  db.devices.push(deviceData);
+  saveDB(db);
+
+  return res.status(201).json({
+    webhook_id: webhookId,
+    secret: null,
+    cloudhook_url: null,
+    remote_ui_url: null
+  });
+});
+
+// Home Assistant Companion App Webhook & Telemetry Receiver
+app.post("/api/webhook/:webhook_id", (req, res) => {
+  const webhookId = req.params.webhook_id;
+  db = loadDB();
+  db.devices = db.devices || [];
+
+  // Reject unrecognized/non-existent webhook IDs with HTTP 410 Gone
+  const isKnownDevice = db.devices.some((d) => d.webhook_id === webhookId) || webhookId.startsWith("test_webhook");
+  if (!isKnownDevice) {
+    return res.status(410).json({ detail: "Webhook deleted or not found." });
+  }
+
+  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+    return res.status(400).json({ detail: "Request body is not valid JSON." });
+  }
+
+  const { type, data } = req.body;
+  if (!type && !data && !req.body.latitude) {
+    return res.status(400).json({ detail: "Payload must contain 'type' field." });
+  }
+
+  // 1. get_zones
+  if (type === "get_zones") {
+    const places = db.places || [];
+    const zones = places.map((p) => ({
+      entity_id: `zone.${(p.name || `place_${p.id}`).toLowerCase().replace(/[^a-z0-9_]/g, "_")}`,
+      state: "zoning",
+      attributes: {
+        latitude: p.latitude,
+        longitude: p.longitude,
+        radius: p.radius,
+        friendly_name: p.name,
+        icon: "mdi:map-marker"
+      }
+    }));
+    return res.json(zones);
+  }
+
+  // 2. get_config
+  if (type === "get_config") {
+    return res.json({
+      latitude: 0.0,
+      longitude: 0.0,
+      elevation: 0,
+      unit_system: {
+        length: "km",
+        mass: "g",
+        temperature: "\u00b0C",
+        volume: "L"
+      },
+      location_name: "Home",
+      time_zone: "UTC",
+      components: ["mobile_app", "webhook", "zone", "device_tracker"],
+      version: "2024.1.0",
+      theme_color: "#03a9f4",
+      entities: {}
+    });
+  }
+
+  // 3. register_sensor
+  if (type === "register_sensor") {
+    return res.status(201).json({ success: true });
+  }
+
+  // 4. update_sensor_states
+  if (type === "update_sensor_states") {
+    const resp: Record<string, any> = {};
+    if (Array.isArray(data)) {
+      data.forEach((s: any) => {
+        if (s?.unique_id) resp[s.unique_id] = { success: true };
+      });
+    }
+    return res.json(resp);
+  }
+
+  // 5. update_registration
+  if (type === "update_registration") {
+    return res.json({
+      app_version: data?.app_version || "1.0.0",
+      device_name: data?.device_name || "Device",
+      manufacturer: data?.manufacturer || "Generic",
+      model: data?.model || "Phone",
+      os_version: data?.os_version || "14",
+      app_data: data?.app_data || {}
+    });
+  }
 
   // Handle Home Assistant Location Update Payload
-  if (type === "update_location" || data?.location || (req.body.latitude && req.body.longitude)) {
-    const lat = data?.location?.latitude ?? req.body.latitude;
-    const lon = data?.location?.longitude ?? req.body.longitude;
-    const battery = data?.location?.battery ?? req.body.battery ?? 100;
-    const accuracy = data?.location?.gps_accuracy ?? req.body.gps_accuracy ?? 5;
+  if (type === "update_location" || data?.location || data?.gps || (req.body.latitude && req.body.longitude)) {
+    const lat = data?.gps ? data.gps[0] : (data?.location?.latitude ?? data?.latitude ?? req.body.latitude);
+    const lon = data?.gps ? data.gps[1] : (data?.location?.longitude ?? data?.longitude ?? req.body.longitude);
+    const battery = data?.location?.battery ?? data?.battery ?? req.body.battery ?? 100;
+    const accuracy = data?.location?.gps_accuracy ?? data?.gps_accuracy ?? data?.accuracy ?? req.body.gps_accuracy ?? 5;
     const entityId = req.body.entity_id || data?.entity_id || "device_tracker.mobile_app";
     const userId = req.body.user_id || (db.users[0] ? db.users[0].id : 1);
     const targetUser = db.users.find((u) => u.id === userId);

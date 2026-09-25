@@ -361,26 +361,29 @@ class TelemetryService:
 
         await db.commit()
 
-        # Initialize or register entity state as "unknown" if it does not exist
+        # Initialize or register entity state if it does not exist
         now_state = await StateService.get_state(db, device.user_id, entity_id)
         if not now_state:
+            initial_state = str(data.state) if data.state is not None else "unknown"
             attributes = {
                 "friendly_name": f"{device.device_name} {data.name}",
                 "device_class": data.device_class,
                 "unit_of_measurement": data.unit_of_measurement,
                 "icon": data.icon
             }
+            if hasattr(data, "attributes") and isinstance(data.attributes, dict):
+                attributes.update(data.attributes)
             attributes = {k: v for k, v in attributes.items() if v is not None}
             await StateService.set_state(
                 db=db,
                 user_id=device.user_id,
                 entity_id=entity_id,
-                state="unknown",
+                state=initial_state,
                 attributes=attributes,
                 device_id=device.id
             )
 
-        return {"status": "registered"}
+        return {"success": True}
 
     @staticmethod
     async def process_sensor_state_updates(
