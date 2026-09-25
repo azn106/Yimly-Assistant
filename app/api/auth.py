@@ -379,7 +379,7 @@ async def update_profile(
                 if m.id == current_user.id:
                     continue
 
-                if not getattr(m, "notify_stop_sharing", True):
+                if getattr(m, "notify_stop_sharing", True) is False:
                     continue
 
                 title = f"{current_user.display_name} stopped sharing location"

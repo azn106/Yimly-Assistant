@@ -293,7 +293,7 @@ class TelemetryService:
                             continue
 
                         # Check notification preferences
-                        if not getattr(m, "notify_arrival_departure", True):
+                        if getattr(m, "notify_arrival_departure", True) is False:
                             continue
 
                         # Generate alert!
@@ -498,7 +498,7 @@ class TelemetryService:
                     if m.id == device.user_id:
                         continue
 
-                    if not getattr(m, "notify_low_battery", True):
+                    if getattr(m, "notify_low_battery", True) is False:
                         continue
 
                     title = f"Low battery: {tracked_user.display_name}"
@@ -577,7 +577,7 @@ class TelemetryService:
                                 continue
 
                             # Check recipient's notify_device_offline preference
-                            if not getattr(m, "notify_device_offline", True):
+                            if getattr(m, "notify_device_offline", True) is False:
                                 continue
 
                             title = f"Device offline: {tracked_user.display_name}"

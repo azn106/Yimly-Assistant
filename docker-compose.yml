@@ -3,10 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: yimly_home
+    container_name: yimly-assistant
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3010:3000"
     environment:
       - APP_ENV=production
       - DATA_DIR=/data
@@ -14,7 +14,7 @@ services:
       - UPLOADS_DIR=/data/uploads
       - PORT=3000
     volumes:
-      - yimly_data:/data
+      - yimly_assistant_data:/data
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:3000/api/config || exit 1"]
       interval: 15s
@@ -25,7 +25,7 @@ services:
       - cloudflared_bridge
 
 volumes:
-  yimly_data:
+  yimly_assistant_data:
     driver: local
 
 networks:
