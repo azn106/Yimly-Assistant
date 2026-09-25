@@ -601,9 +601,80 @@ wss.on("connection", (ws: WebSocket) => {
     try {
       const data = JSON.parse(message.toString());
       if (data.type === "auth") {
-        ws.send(JSON.stringify({ type: "auth_ok", ha_version: "2026.3.0" }));
+        ws.send(JSON.stringify({ type: "auth_ok", ha_version: "2026.9.1" }));
       } else if (data.type === "subscribe_events") {
         ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+      } else if (data.type === "get_config") {
+        ws.send(JSON.stringify({
+          id: data.id,
+          type: "result",
+          success: true,
+          result: {
+            latitude: 0.0,
+            longitude: 0.0,
+            elevation: 0,
+            unit_system: { length: "km", mass: "g", temperature: "°C", volume: "L" },
+            location_name: "Home Assistant",
+            time_zone: "UTC",
+            components: ["api", "websocket", "mobile_app", "device_tracker", "sensor"],
+            version: "2026.9.1"
+          }
+        }));
+      } else if (data.type === "get_states") {
+        db = loadDB();
+        ws.send(JSON.stringify({
+          id: data.id,
+          type: "result",
+          success: true,
+          result: db.entity_states || []
+        }));
+      } else if (data.type === "config/device_registry/list") {
+        db = loadDB();
+        const devices = (db.devices || []).map((d: any) => ({
+          id: String(d.id),
+          name: d.device_name,
+          model: d.model,
+          manufacturer: d.manufacturer,
+          sw_version: d.os_version,
+          identifiers: [["mobile_app", d.device_id]],
+          connections: [],
+          area_id: null,
+          disabled_by: null,
+          entry_type: null
+        }));
+        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: devices }));
+      } else if (data.type === "config/entity_registry/list") {
+        db = loadDB();
+        const entities = (db.entity_states || []).map((e: any) => ({
+          entity_id: e.entity_id,
+          name: e.attributes?.friendly_name || null,
+          icon: e.attributes?.icon || null,
+          platform: "mobile_app",
+          config_entry_id: null,
+          device_id: null,
+          area_id: null,
+          disabled_by: null,
+          capabilities: {}
+        }));
+        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: entities }));
+      } else if (data.type === "config/area_registry/list") {
+        db = loadDB();
+        const areas = (db.places || []).map((p: any) => ({
+          area_id: `area_${p.id}`,
+          name: p.name,
+          picture: null,
+          aliases: []
+        }));
+        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: areas }));
+      } else if (data.type === "frontend/get_user_data") {
+        ws.send(JSON.stringify({
+          id: data.id,
+          type: "result",
+          success: true,
+          result: { show_advanced_options: false }
+        }));
+      } else if (data.type === "ping") {
+        ws.send(JSON.stringify({ id: data.id, type: "pong" }));
       }
     } catch (e) {
       // Ignore invalid JSON
@@ -666,6 +737,43 @@ function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) 
 app.get("/api/setup/status", (req, res) => {
   db = loadDB();
   res.json({ is_initialized: db.users.length > 0 });
+});
+
+// Home Assistant Core discovery and services endpoints
+app.get("/api/discovery_info", (req, res) => {
+  res.json({
+    base_url: `http://localhost:${PORT}`,
+    location_name: "Home Assistant",
+    installation_type: "Home Assistant OS",
+    version: "2026.9.1",
+    requires_api_password: false
+  });
+});
+
+app.get("/api/services", (req, res) => {
+  res.json([
+    {
+      domain: "homeassistant",
+      services: {
+        turn_on: { name: "Turn on", description: "Turn on a device", fields: {} },
+        turn_off: { name: "Turn off", description: "Turn off a device", fields: {} },
+        toggle: { name: "Toggle", description: "Toggle state", fields: {} },
+        update_entity: { name: "Update entity", description: "Request entity update", fields: {} }
+      }
+    },
+    {
+      domain: "device_tracker",
+      services: {
+        see: { name: "See", description: "Record device location", fields: {} }
+      }
+    },
+    {
+      domain: "notify",
+      services: {
+        notify: { name: "Send notification", description: "Send notification", fields: {} }
+      }
+    }
+  ]);
 });
 
 app.post("/api/setup/register", (req, res) => {

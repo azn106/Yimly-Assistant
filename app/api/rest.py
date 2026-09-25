@@ -41,6 +41,68 @@ async def api_config(user: User = Depends(require_authenticated_user)) -> Config
         whitelist_external_dirs=[]
     )
 
+@router.get("/api/discovery_info")
+async def api_discovery_info():
+    """Home Assistant Core discovery_info endpoint for Companion App discovery and connection handshake."""
+    return {
+        "base_url": settings.BASE_URL,
+        "location_name": "Home Assistant",
+        "installation_type": "Home Assistant OS",
+        "version": "2026.9.1",
+        "requires_api_password": False
+    }
+
+@router.get("/api/services")
+async def api_services(user: User = Depends(require_authenticated_user)):
+    """Home Assistant Core services endpoint returning supported service domains."""
+    return [
+        {
+            "domain": "homeassistant",
+            "services": {
+                "turn_on": {
+                    "name": "Turn on",
+                    "description": "Turn a device or entity on.",
+                    "fields": {}
+                },
+                "turn_off": {
+                    "name": "Turn off",
+                    "description": "Turn a device or entity off.",
+                    "fields": {}
+                },
+                "toggle": {
+                    "name": "Toggle",
+                    "description": "Toggle a device or entity state.",
+                    "fields": {}
+                },
+                "update_entity": {
+                    "name": "Update entity",
+                    "description": "Request entity state update.",
+                    "fields": {}
+                }
+            }
+        },
+        {
+            "domain": "device_tracker",
+            "services": {
+                "see": {
+                    "name": "See",
+                    "description": "Manually record device location.",
+                    "fields": {}
+                }
+            }
+        },
+        {
+            "domain": "notify",
+            "services": {
+                "notify": {
+                    "name": "Send notification",
+                    "description": "Send a notification to a companion app device.",
+                    "fields": {}
+                }
+            }
+        }
+    ]
+
 @router.get("/api/states", response_model=List[EntityStateResponse])
 async def api_get_states(
     user: User = Depends(require_authenticated_user),

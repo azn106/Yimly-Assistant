@@ -202,6 +202,70 @@ export default function App() {
   const checkSessionAndSetup = async () => {
     setStatus("checking");
     setError(null);
+
+    // 1. Check for Home Assistant Android Companion App external_auth bridge (?external_auth=1)
+    const urlParams = new URLSearchParams(window.location.search);
+    const isExternalAuth = urlParams.get("external_auth") === "1";
+
+    if (isExternalAuth) {
+      console.log("[ExternalAuth] Detected ?external_auth=1 from Companion App WebView.");
+      try {
+        const externalToken = await new Promise<string | null>((resolve) => {
+          let resolved = false;
+          const timeout = setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              console.warn("[ExternalAuth] Timeout waiting for native externalApp response.");
+              resolve(null);
+            }
+          }, 4000);
+
+          const callbackName = "__externalAuthCallback_" + Math.random().toString(36).substring(2, 9);
+          (window as any)[callbackName] = (success: boolean, data?: any) => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timeout);
+            try {
+              delete (window as any)[callbackName];
+            } catch {}
+            if (success && data?.access_token) {
+              console.log("[ExternalAuth] Token received from Companion App externalApp bridge.");
+              resolve(data.access_token);
+            } else {
+              console.warn("[ExternalAuth] externalApp returned failure or no access_token:", data);
+              resolve(null);
+            }
+          };
+
+          const extApp = (window as any).externalAppV2 || (window as any).externalApp;
+          if (extApp && typeof extApp.getExternalAuth === "function") {
+            try {
+              // Android interface passes JSON string payload
+              extApp.getExternalAuth(JSON.stringify({ callback: callbackName, force: false }));
+            } catch (callErr) {
+              console.warn("[ExternalAuth] Error calling externalApp.getExternalAuth with string:", callErr);
+              try {
+                // Fallback for objects
+                extApp.getExternalAuth({ callback: callbackName, force: false });
+              } catch (e2) {
+                console.error("[ExternalAuth] Failed to invoke externalApp.getExternalAuth:", e2);
+                resolve(null);
+              }
+            }
+          } else {
+            console.log("[ExternalAuth] Native externalApp bridge object not present on window.");
+            resolve(null);
+          }
+        });
+
+        if (externalToken) {
+          localStorage.setItem("access_token", externalToken);
+        }
+      } catch (extErr) {
+        console.warn("[ExternalAuth] Error during external auth exchange:", extErr);
+      }
+    }
+
     const token = localStorage.getItem("access_token");
 
     if (token) {

@@ -234,6 +234,98 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
             }
         })
 
+    elif cmd_type == "config/device_registry/list":
+        async with async_session_maker() as db:
+            from app.db.models import Device
+            stmt = select(Device).where(Device.user_id == user_id)
+            res = await db.execute(stmt)
+            devices = res.scalars().all()
+            device_list = [
+                {
+                    "id": str(d.id),
+                    "name": d.device_name,
+                    "model": d.model,
+                    "manufacturer": d.manufacturer,
+                    "sw_version": d.os_version,
+                    "identifiers": [["mobile_app", d.device_id]],
+                    "connections": [],
+                    "area_id": None,
+                    "disabled_by": None,
+                    "entry_type": None
+                }
+                for d in devices
+            ]
+            await session.send_json({
+                "id": cmd_id,
+                "type": "result",
+                "success": True,
+                "result": device_list
+            })
+
+    elif cmd_type == "config/entity_registry/list":
+        async with async_session_maker() as db:
+            from app.db.models import EntityState
+            stmt = select(EntityState).where(EntityState.user_id == user_id)
+            res = await db.execute(stmt)
+            entities = res.scalars().all()
+            entity_list = [
+                {
+                    "entity_id": e.entity_id,
+                    "name": e.attributes.get("friendly_name") if isinstance(e.attributes, dict) else None,
+                    "icon": e.attributes.get("icon") if isinstance(e.attributes, dict) else None,
+                    "platform": "mobile_app",
+                    "config_entry_id": None,
+                    "device_id": str(e.device_id) if e.device_id else None,
+                    "area_id": None,
+                    "disabled_by": None,
+                    "capabilities": {}
+                }
+                for e in entities
+            ]
+            await session.send_json({
+                "id": cmd_id,
+                "type": "result",
+                "success": True,
+                "result": entity_list
+            })
+
+    elif cmd_type == "config/area_registry/list":
+        async with async_session_maker() as db:
+            from app.db.models import Place, CircleMember
+            stmt_circles = select(CircleMember.circle_id).where(CircleMember.user_id == user_id)
+            res_circles = await db.execute(stmt_circles)
+            circle_ids = res_circles.scalars().all()
+            area_list = []
+            if circle_ids:
+                stmt_places = select(Place).where(Place.circle_id.in_(circle_ids))
+                res_places = await db.execute(stmt_places)
+                places = res_places.scalars().all()
+                area_list = [
+                    {
+                        "area_id": f"area_{p.id}",
+                        "name": p.name,
+                        "picture": None,
+                        "aliases": []
+                    }
+                    for p in places
+                ]
+            await session.send_json({
+                "id": cmd_id,
+                "type": "result",
+                "success": True,
+                "result": area_list
+            })
+
+    elif cmd_type == "frontend/get_user_data":
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": {
+                "show_advanced_options": False
+            }
+        })
+
     else:
         # Return elegant error for unrecognized commands to prevent connection crashes
         logger.warning(f"Unsupported command type received: {cmd_type}")

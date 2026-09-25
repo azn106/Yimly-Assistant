@@ -196,7 +196,7 @@ async def serve_static_or_spa(full_path: str):
             return FileResponse(target_file)
         index_file = os.path.join(dist_path, "index.html")
         if os.path.exists(index_file):
-            return FileResponse(index_file)
+            return FileResponse(index_file, media_type="text/html")
             
     return JSONResponse(
         status_code=200,
