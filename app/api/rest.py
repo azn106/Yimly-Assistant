@@ -7,7 +7,7 @@ from app.api.deps import require_authenticated_user
 from app.core.config import settings
 from app.core.logging import logger
 from app.db.database import get_db
-from app.db.models import User, LocationHistory, CircleMember, EntityState
+from app.db.models import User, LocationHistory, CircleMember, EntityState, Device
 from app.schemas.api import ConfigResponse, EntityStateResponse, UnitSystem
 from app.services.state_service import StateService
 from app.services.event_service import event_bus
@@ -435,3 +435,36 @@ async def api_update_device(
         "is_default": attrs.get("is_default", False),
         "allow_find_my_device": attrs.get("allow_find_my_device", True)
     }
+
+
+@router.delete("/api/devices/{entity_id:path}")
+async def api_delete_device(
+    entity_id: str,
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(EntityState).where(
+        EntityState.user_id == user.id,
+        EntityState.entity_id == entity_id
+    )
+    res = await db.execute(stmt)
+    st = res.scalar_one_or_none()
+    if not st:
+        raise HTTPException(status_code=404, detail="Device entity not found")
+
+    device_id = st.device_id
+    await db.delete(st)
+
+    if device_id:
+        stmt_dev = select(Device).where(
+            Device.id == device_id,
+            Device.user_id == user.id
+        )
+        res_dev = await db.execute(stmt_dev)
+        dev = res_dev.scalar_one_or_none()
+        if dev:
+            await db.delete(dev)
+
+    await db.commit()
+
+    return {"success": True, "message": "Device deleted successfully"}

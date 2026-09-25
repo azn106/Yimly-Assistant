@@ -1255,6 +1255,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
   const [editDeviceName, setEditDeviceName] = useState("");
+  const [deleteConfirmDevice, setDeleteConfirmDevice] = useState<UserDevice | null>(null);
+  const [deletingDeviceId, setDeletingDeviceId] = useState<string | null>(null);
+  const [deviceActionError, setDeviceActionError] = useState<string | null>(null);
+  const [deviceActionSuccess, setDeviceActionSuccess] = useState<string | null>(null);
 
   const fetchDevices = async () => {
     setDevicesLoading(true);
@@ -1308,6 +1312,35 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       }
     } catch (err) {
       console.error("Failed to update device:", err);
+    }
+  };
+
+  const handleDeleteDevice = async (device: UserDevice) => {
+    setDeletingDeviceId(device.entity_id);
+    setDeviceActionError(null);
+    try {
+      const token = getToken();
+      const res = await fetch(`/api/devices/${encodeURIComponent(device.entity_id)}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Failed to delete device");
+      }
+
+      setDevicesList((prev) => prev.filter((d) => d.entity_id !== device.entity_id));
+      setDeleteConfirmDevice(null);
+      setDeviceActionSuccess(`Device "${device.name}" was successfully removed.`);
+      setTimeout(() => setDeviceActionSuccess(null), 4000);
+    } catch (err: any) {
+      console.error("Failed to delete device:", err);
+      setDeviceActionError(err.message || "Failed to delete device. Please try again.");
+    } finally {
+      setDeletingDeviceId(null);
     }
   };
 
@@ -2225,6 +2258,37 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
         {openSections.devices && (
           <div className="mt-6 pt-5 border-t border-slate-100/90 space-y-4">
+            {deviceActionError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs font-semibold flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{deviceActionError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDeviceActionError(null)}
+                  className="text-rose-500 hover:text-rose-700 p-1 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+            {deviceActionSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl text-xs font-semibold flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{deviceActionSuccess}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDeviceActionSuccess(null)}
+                  className="text-emerald-500 hover:text-emerald-700 p-1 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
             {devicesLoading ? (
               <div className="flex items-center justify-center py-8 text-slate-400 text-xs font-semibold">
                 <RefreshCw className="w-4 h-4 animate-spin mr-2" />
@@ -2436,6 +2500,21 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                         <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
                       </label>
                     </div>
+
+                    {/* Delete Device Action */}
+                    <div className="pt-2 flex justify-end border-t border-slate-200/50">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeviceActionError(null);
+                          setDeleteConfirmDevice(device);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-rose-600 hover:text-rose-700 hover:bg-rose-50 border border-rose-200/80 transition cursor-pointer shadow-2xs"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete device</span>
+                      </button>
+                    </div>
                   </div>
                 );
               })
@@ -2447,6 +2526,62 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       {/* ======================================================== */}
       {/* MODALS & OVERLAYS */}
       {/* ======================================================== */}
+
+      {/* Delete Device Confirmation Modal */}
+      {deleteConfirmDevice && createPortal(
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200 overflow-y-auto pointer-events-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !deletingDeviceId) {
+              setDeleteConfirmDevice(null);
+              setDeviceActionError(null);
+            }
+          }}
+        >
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 relative my-auto space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <div className="text-center">
+              <h3 className="text-base font-bold text-slate-800">Delete Device?</h3>
+              <p className="text-xs text-slate-500 font-medium mt-1 leading-relaxed">
+                Are you sure you want to delete <strong className="text-slate-800 font-bold">{deleteConfirmDevice.name}</strong>? This device will be permanently removed from your Yimly account.
+              </p>
+            </div>
+
+            {deviceActionError && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{deviceActionError}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteConfirmDevice(null);
+                  setDeviceActionError(null);
+                }}
+                disabled={Boolean(deletingDeviceId)}
+                className="flex-1 py-2.5 rounded-2xl text-xs font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDeleteDevice(deleteConfirmDevice)}
+                disabled={Boolean(deletingDeviceId)}
+                className="flex-1 py-2.5 rounded-2xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+              >
+                {deletingDeviceId && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{deletingDeviceId ? "Deleting..." : "Delete"}</span>
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
 
       {/* Change Password Modal */}
       {showPasswordModal && createPortal(

@@ -144,68 +144,146 @@ async function runPostRegistrationTestSuite() {
         }
         console.log("  ✓ Received 'auth_ok'.");
         step = 2;
-        // Send config/device_registry/list
-        ws.send(JSON.stringify({ id: 1, type: "config/device_registry/list" }));
+        // Send auth/current_user (Home Assistant standard initial command)
+        ws.send(JSON.stringify({ id: 1, type: "auth/current_user" }));
       } else if (step === 2) {
-        if (msg.id !== 1 || !msg.success || !Array.isArray(msg.result)) {
+        if (msg.id !== 1 || !msg.success || !msg.result || !msg.result.id || !msg.result.name) {
+          clearTimeout(timeout);
+          return reject(new Error(`Invalid auth/current_user response: ${JSON.stringify(msg)}`));
+        }
+        // Verify no sensitive keys leaked
+        const rawJson = JSON.stringify(msg.result);
+        if (rawJson.includes("password") || rawJson.includes("token") || rawJson.includes("secret")) {
+          clearTimeout(timeout);
+          return reject(new Error(`auth/current_user exposed sensitive data: ${rawJson}`));
+        }
+        console.log(`  ✓ Received 'auth/current_user' result (User: ${msg.result.name}, ID: ${msg.result.id}, is_owner: ${msg.result.is_owner}).`);
+        step = 3;
+        // Send config/device_registry/list
+        ws.send(JSON.stringify({ id: 2, type: "config/device_registry/list" }));
+      } else if (step === 3) {
+        if (msg.id !== 2 || !msg.success || !Array.isArray(msg.result)) {
           clearTimeout(timeout);
           return reject(new Error(`Invalid config/device_registry/list response: ${JSON.stringify(msg)}`));
         }
         console.log("  ✓ Received 'config/device_registry/list' result.");
-        step = 3;
+        step = 4;
         // Send config/entity_registry/list
-        ws.send(JSON.stringify({ id: 2, type: "config/entity_registry/list" }));
-      } else if (step === 3) {
-        if (msg.id !== 2 || !msg.success || !Array.isArray(msg.result)) {
+        ws.send(JSON.stringify({ id: 3, type: "config/entity_registry/list" }));
+      } else if (step === 4) {
+        if (msg.id !== 3 || !msg.success || !Array.isArray(msg.result)) {
           clearTimeout(timeout);
           return reject(new Error(`Invalid config/entity_registry/list response: ${JSON.stringify(msg)}`));
         }
         console.log("  ✓ Received 'config/entity_registry/list' result.");
-        step = 4;
+        step = 5;
         // Send config/area_registry/list
-        ws.send(JSON.stringify({ id: 3, type: "config/area_registry/list" }));
-      } else if (step === 4) {
-        if (msg.id !== 3 || !msg.success || !Array.isArray(msg.result)) {
+        ws.send(JSON.stringify({ id: 4, type: "config/area_registry/list" }));
+      } else if (step === 5) {
+        if (msg.id !== 4 || !msg.success || !Array.isArray(msg.result)) {
           clearTimeout(timeout);
           return reject(new Error(`Invalid config/area_registry/list response: ${JSON.stringify(msg)}`));
         }
         console.log("  ✓ Received 'config/area_registry/list' result.");
-        step = 5;
+        step = 6;
         // Send frontend/get_user_data
-        ws.send(JSON.stringify({ id: 4, type: "frontend/get_user_data" }));
-      } else if (step === 5) {
-        if (msg.id !== 4 || !msg.success) {
+        ws.send(JSON.stringify({ id: 5, type: "frontend/get_user_data" }));
+      } else if (step === 6) {
+        if (msg.id !== 5 || !msg.success) {
           clearTimeout(timeout);
           return reject(new Error(`Invalid frontend/get_user_data response: ${JSON.stringify(msg)}`));
         }
         console.log("  ✓ Received 'frontend/get_user_data' result.");
-        step = 6;
+        step = 7;
         // Send get_config
-        ws.send(JSON.stringify({ id: 5, type: "get_config" }));
-      } else if (step === 6) {
-        if (msg.id !== 5 || !msg.success || !msg.result?.components) {
+        ws.send(JSON.stringify({ id: 6, type: "get_config" }));
+      } else if (step === 7) {
+        if (msg.id !== 6 || !msg.success || !msg.result?.components) {
           clearTimeout(timeout);
           return reject(new Error(`Invalid get_config response: ${JSON.stringify(msg)}`));
         }
         console.log("  ✓ Received 'get_config' result.");
-        step = 7;
+        step = 8;
         // Send get_states
-        ws.send(JSON.stringify({ id: 6, type: "get_states" }));
-      } else if (step === 7) {
-        if (msg.id !== 6 || !msg.success || !Array.isArray(msg.result)) {
+        ws.send(JSON.stringify({ id: 7, type: "get_states" }));
+      } else if (step === 8) {
+        if (msg.id !== 7 || !msg.success || !Array.isArray(msg.result)) {
           clearTimeout(timeout);
           return reject(new Error(`Invalid get_states response: ${JSON.stringify(msg)}`));
         }
         console.log("  ✓ Received 'get_states' result.");
-        step = 8;
+        step = 9;
         // Send subscribe_events
-        ws.send(JSON.stringify({ id: 7, type: "subscribe_events", event_type: "state_changed" }));
-      } else if (step === 8) {
-        if (msg.id !== 7 || !msg.success) {
+        ws.send(JSON.stringify({ id: 8, type: "subscribe_events", event_type: "state_changed" }));
+      } else if (step === 9) {
+        if (msg.id !== 8 || !msg.success) {
           clearTimeout(timeout);
           return reject(new Error(`Invalid subscribe_events response: ${JSON.stringify(msg)}`));
         }
         console.log("  ✓ Received 'subscribe_events' result.");
+        step = 10;
+        // Send supported_features (coalesce_messages)
+        ws.send(JSON.stringify({ id: 9, type: "supported_features", features: { coalesce_messages: 1 } }));
+      } else if (step === 10) {
+        if (msg.id !== 9 || !msg.success) {
+          clearTimeout(timeout);
+          return reject(new Error(`Invalid supported_features response: ${JSON.stringify(msg)}`));
+        }
+        console.log("  ✓ Received 'supported_features' result.");
+        step = 11;
+        // Send ping with id
+        ws.send(JSON.stringify({ id: 10, type: "ping" }));
+      } else if (step === 11) {
+        if (msg.id !== 10 || msg.type !== "pong") {
+          clearTimeout(timeout);
+          return reject(new Error(`Invalid ping response: ${JSON.stringify(msg)}`));
+        }
+        console.log("  ✓ Received 'pong' for ping with id.");
+        step = 12;
+        // Send get_services
+        ws.send(JSON.stringify({ id: 11, type: "get_services" }));
+      } else if (step === 12) {
+        if (msg.id !== 11 || !msg.success) {
+          clearTimeout(timeout);
+          return reject(new Error(`Invalid get_services response: ${JSON.stringify(msg)}`));
+        }
+        console.log("  ✓ Received 'get_services' result.");
+        step = 13;
+        // Send get_panels
+        ws.send(JSON.stringify({ id: 12, type: "get_panels" }));
+      } else if (step === 13) {
+        if (msg.id !== 12 || !msg.success || !msg.result?.lovelace) {
+          clearTimeout(timeout);
+          return reject(new Error(`Invalid get_panels response: ${JSON.stringify(msg)}`));
+        }
+        console.log("  ✓ Received 'get_panels' result.");
+        step = 14;
+        // Send frontend/get_translations
+        ws.send(JSON.stringify({ id: 13, type: "frontend/get_translations" }));
+      } else if (step === 14) {
+        if (msg.id !== 13 || !msg.success) {
+          clearTimeout(timeout);
+          return reject(new Error(`Invalid frontend/get_translations response: ${JSON.stringify(msg)}`));
+        }
+        console.log("  ✓ Received 'frontend/get_translations' result.");
+        step = 15;
+        // Send manifest/list
+        ws.send(JSON.stringify({ id: 14, type: "manifest/list" }));
+      } else if (step === 15) {
+        if (msg.id !== 14 || !msg.success || !Array.isArray(msg.result)) {
+          clearTimeout(timeout);
+          return reject(new Error(`Invalid manifest/list response: ${JSON.stringify(msg)}`));
+        }
+        console.log("  ✓ Received 'manifest/list' result.");
+        step = 16;
+        // Send unsubscribe_events
+        ws.send(JSON.stringify({ id: 15, type: "unsubscribe_events", subscription: 8 }));
+      } else if (step === 16) {
+        if (msg.id !== 15 || !msg.success) {
+          clearTimeout(timeout);
+          return reject(new Error(`Invalid unsubscribe_events response: ${JSON.stringify(msg)}`));
+        }
+        console.log("  ✓ Received 'unsubscribe_events' result.");
         clearTimeout(timeout);
         ws.close();
         resolve();
@@ -228,6 +306,58 @@ async function runPostRegistrationTestSuite() {
     throw new Error(`Expected username ${username}, got ${meRes.data.username}`);
   }
   console.log(`✓ Token validated successfully for user: ${meRes.data.username}`);
+
+  // 7. Test Multiple Simultaneous WebSocket Connections (e.g. Companion App Webview + Native Background Service)
+  console.log("\n7. Testing multiple simultaneous WebSocket connections for same user...");
+  await new Promise<void>((resolve, reject) => {
+    const ws1 = new WebSocket(WS_URL);
+    const ws2 = new WebSocket(WS_URL);
+    let ws1Ready = false;
+    let ws2Ready = false;
+
+    const timeout = setTimeout(() => {
+      ws1.close();
+      ws2.close();
+      reject(new Error("Multi-connection test timed out"));
+    }, 6000);
+
+    const checkBothReady = () => {
+      if (ws1Ready && ws2Ready) {
+        clearTimeout(timeout);
+        ws1.close();
+        ws2.close();
+        console.log("  ✓ Both concurrent WebSocket sessions authenticated and responded independently.");
+        resolve();
+      }
+    };
+
+    ws1.on("message", (raw) => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === "auth_required") {
+        ws1.send(JSON.stringify({ type: "auth", access_token: token }));
+      } else if (msg.type === "auth_ok") {
+        ws1.send(JSON.stringify({ id: 101, type: "auth/current_user" }));
+      } else if (msg.id === 101 && msg.success) {
+        ws1Ready = true;
+        checkBothReady();
+      }
+    });
+
+    ws2.on("message", (raw) => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === "auth_required") {
+        ws2.send(JSON.stringify({ type: "auth", access_token: token }));
+      } else if (msg.type === "auth_ok") {
+        ws2.send(JSON.stringify({ id: 201, type: "auth/current_user" }));
+      } else if (msg.id === 201 && msg.success) {
+        ws2Ready = true;
+        checkBothReady();
+      }
+    });
+
+    ws1.on("error", (err) => { clearTimeout(timeout); reject(err); });
+    ws2.on("error", (err) => { clearTimeout(timeout); reject(err); });
+  });
 
   console.log("\n============================================================");
   console.log("ALL POST-REGISTRATION COMPANION APP TESTS PASSED! 🎉");

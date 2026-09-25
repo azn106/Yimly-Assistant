@@ -607,17 +607,81 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 const connectedClients = new Set<WebSocket>();
 
+// Keepalive heartbeat every 25 seconds to keep proxies and clients alive
+setInterval(() => {
+  connectedClients.forEach((ws) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.ping();
+      } catch {}
+    }
+  });
+}, 25000);
+
 wss.on("connection", (ws: WebSocket) => {
   connectedClients.add(ws);
-  ws.send(JSON.stringify({ type: "auth_required", ha_version: "2026.3.0" }));
+  let authenticatedUserId: number | null = null;
+  ws.send(JSON.stringify({ type: "auth_required", ha_version: "2026.9.1" }));
 
   ws.on("message", (message: string) => {
     try {
       const data = JSON.parse(message.toString());
+      if (data.type === "pong") {
+        return;
+      }
       if (data.type === "auth") {
+        const token = data.access_token;
+        if (token) {
+          try {
+            const decoded: any = jwt.verify(token, JWT_SECRET);
+            if (decoded && decoded.sub) {
+              authenticatedUserId = Number(decoded.sub);
+            }
+          } catch {}
+        }
         ws.send(JSON.stringify({ type: "auth_ok", ha_version: "2026.9.1" }));
+      } else if (data.type === "auth/current_user") {
+        db = loadDB();
+        const u = authenticatedUserId ? db.users.find((user: any) => user.id === authenticatedUserId) : (db.users[0] || null);
+        const userName = u ? (u.display_name || u.username) : (authenticatedUserId ? `User ${authenticatedUserId}` : "User");
+        const userIdStr = u ? String(u.id) : (authenticatedUserId ? String(authenticatedUserId) : "1");
+        ws.send(JSON.stringify({
+          id: data.id,
+          type: "result",
+          success: true,
+          result: {
+            id: userIdStr,
+            name: userName,
+            is_owner: true,
+            is_admin: true,
+            credentials: [],
+            mfa_modules: []
+          }
+        }));
+      } else if (data.type === "ping") {
+        ws.send(JSON.stringify(data.id !== undefined ? { id: data.id, type: "pong" } : { type: "pong" }));
+      } else if (data.type === "supported_features") {
+        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
       } else if (data.type === "subscribe_events") {
         ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+      } else if (data.type === "unsubscribe_events") {
+        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+      } else if (data.type === "subscribe_trigger") {
+        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+      } else if (data.type === "persistent_notification/get") {
+        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: [] }));
+      } else if (data.type === "call_service") {
+        ws.send(JSON.stringify({
+          id: data.id,
+          type: "result",
+          success: true,
+          result: {
+            context: {
+              id: `ctx_${data.id}`,
+              user_id: authenticatedUserId ? String(authenticatedUserId) : "1"
+            }
+          }
+        }));
       } else if (data.type === "get_config") {
         ws.send(JSON.stringify({
           id: data.id,
@@ -633,6 +697,36 @@ wss.on("connection", (ws: WebSocket) => {
             components: ["api", "websocket", "mobile_app", "device_tracker", "sensor"],
             version: "2026.9.1"
           }
+        }));
+      } else if (data.type === "get_services") {
+        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: {} }));
+      } else if (data.type === "get_panels") {
+        ws.send(JSON.stringify({
+          id: data.id,
+          type: "result",
+          success: true,
+          result: {
+            lovelace: {
+              title: "Home",
+              icon: "mdi:home-assistant",
+              url_path: "lovelace",
+              config: { views: [] }
+            }
+          }
+        }));
+      } else if (data.type === "frontend/get_translations") {
+        ws.send(JSON.stringify({
+          id: data.id,
+          type: "result",
+          success: true,
+          result: { resources: {} }
+        }));
+      } else if (data.type === "manifest/list") {
+        ws.send(JSON.stringify({
+          id: data.id,
+          type: "result",
+          success: true,
+          result: []
         }));
       } else if (data.type === "get_states") {
         db = loadDB();
@@ -687,12 +781,21 @@ wss.on("connection", (ws: WebSocket) => {
           success: true,
           result: { show_advanced_options: false }
         }));
-      } else if (data.type === "ping") {
-        ws.send(JSON.stringify({ id: data.id, type: "pong" }));
+      } else {
+        ws.send(JSON.stringify({
+          id: data.id,
+          type: "result",
+          success: false,
+          error: { code: "not_supported", message: `Command '${data.type}' is not supported.` }
+        }));
       }
     } catch (e) {
       // Ignore invalid JSON
     }
+  });
+
+  ws.on("error", () => {
+    connectedClients.delete(ws);
   });
 
   ws.on("close", () => {
@@ -1891,6 +1994,45 @@ app.put("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) =>
   });
 });
 
+app.delete("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) => {
+  db = loadDB();
+  const entityId = req.params.entity_id;
+  const userId = req.user!.id;
+
+  const dtIndex = db.entity_states.findIndex(
+    (e) => e.entity_id === entityId && e.user_id === userId
+  );
+
+  if (dtIndex === -1) {
+    return res.status(404).json({ detail: "Device not found" });
+  }
+
+  // Remove the entity_state
+  db.entity_states.splice(dtIndex, 1);
+
+  // If there are associated devices in db.devices matching device tracker or webhook, clean up
+  if (db.devices && Array.isArray(db.devices)) {
+    db.devices = db.devices.filter((d) => {
+      if (d.user_id !== userId) return true;
+      if (d.device_id && entityId.includes(d.device_id)) return false;
+      return true;
+    });
+  }
+
+  // Remove associated location history for this entity
+  if (db.location_history && Array.isArray(db.location_history)) {
+    db.location_history = db.location_history.filter((lh) => {
+      if (lh.user_id !== userId) return true;
+      if (lh.entity_id === entityId) return false;
+      return true;
+    });
+  }
+
+  saveDB(db);
+
+  res.json({ success: true, message: "Device deleted successfully" });
+});
+
 app.get("/api/mobile_app/config", authenticateToken, (req: AuthRequest, res) => {
   db = loadDB();
   const u = db.users.find((user) => user.id === req.user!.id);
@@ -2274,8 +2416,23 @@ app.post("/api/mobile_app/registrations", (req, res) => {
   db = loadDB();
   db.devices = db.devices || [];
   const webhookId = crypto.randomBytes(16).toString("hex");
+
+  let authUserId = 1;
+  const authHeader = req.headers["authorization"];
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    try {
+      const decoded: any = jwt.verify(authHeader.split(" ")[1], JWT_SECRET);
+      if (decoded && decoded.sub) {
+        authUserId = Number(decoded.sub);
+      }
+    } catch {}
+  } else if (db.users[0]) {
+    authUserId = db.users[0].id;
+  }
+
   const deviceData = {
     id: Date.now(),
+    user_id: authUserId,
     device_id: req.body.device_id || "device_unknown",
     device_name: req.body.device_name || "Companion Phone",
     app_version: req.body.app_version || "1.0.0",
@@ -2299,7 +2456,8 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
   db.devices = db.devices || [];
 
   // Reject unrecognized/non-existent webhook IDs with HTTP 410 Gone
-  const isKnownDevice = db.devices.some((d) => d.webhook_id === webhookId) || webhookId.startsWith("test_webhook");
+  const matchingDevice = db.devices.find((d) => d.webhook_id === webhookId);
+  const isKnownDevice = Boolean(matchingDevice) || webhookId.startsWith("test_webhook");
   if (!isKnownDevice) {
     return res.status(410).json({ detail: "Webhook deleted or not found." });
   }
@@ -2385,8 +2543,8 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
     const lon = data?.gps ? data.gps[1] : (data?.location?.longitude ?? data?.longitude ?? req.body.longitude);
     const battery = data?.location?.battery ?? data?.battery ?? req.body.battery ?? 100;
     const accuracy = data?.location?.gps_accuracy ?? data?.gps_accuracy ?? data?.accuracy ?? req.body.gps_accuracy ?? 5;
-    const entityId = req.body.entity_id || data?.entity_id || "device_tracker.mobile_app";
-    const userId = req.body.user_id || (db.users[0] ? db.users[0].id : 1);
+    const userId = req.body.user_id || (matchingDevice ? matchingDevice.user_id : (db.users[0] ? db.users[0].id : 1));
+    const entityId = req.body.entity_id || data?.entity_id || (matchingDevice ? `device_tracker.${matchingDevice.device_id}` : "device_tracker.mobile_app");
     const targetUser = db.users.find((u) => u.id === userId);
 
     if (lat != null && lon != null) {
@@ -2399,7 +2557,7 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
         domain: "device_tracker",
         state: "not_home",
         attributes: {
-          friendly_name: req.body.device_name || (existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.friendly_name : "Companion Phone"),
+          friendly_name: req.body.device_name || (matchingDevice ? matchingDevice.device_name : (existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.friendly_name : "Companion Phone")),
           battery_level: battery,
           gps_accuracy: accuracy,
           platform: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.platform || "Android" : "Android",

@@ -1,6 +1,7 @@
 import asyncio
 from typing import Any, Callable, Dict, Optional, Set
 from fastapi import WebSocket
+from starlette.websockets import WebSocketState
 from app.core.logging import logger
 
 class WebSocketSession:
@@ -12,9 +13,11 @@ class WebSocketSession:
 
     async def send_json(self, data: Dict[str, Any]) -> None:
         try:
-            await self.websocket.send_json(data)
+            if self.websocket.client_state == WebSocketState.CONNECTED:
+                await self.websocket.send_json(data)
         except Exception as e:
             logger.debug(f"Failed to send JSON to WebSocket: {e}")
+            raise
 
 class WebSocketSessionManager:
     def __init__(self) -> None:
@@ -41,3 +44,4 @@ class WebSocketSessionManager:
             await asyncio.gather(*[s.send_json(message) for s in user_sessions], return_exceptions=True)
 
 session_manager = WebSocketSessionManager()
+

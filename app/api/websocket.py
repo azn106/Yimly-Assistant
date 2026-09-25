@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
@@ -10,6 +11,18 @@ from app.services.state_service import StateService
 from app.services.websocket_service import session_manager
 
 router = APIRouter()
+
+async def session_keepalive(session: Any) -> None:
+    """Sends periodic keepalive pings to prevent proxy/NAT/Cloud Run 60s idle disconnects."""
+    try:
+        while True:
+            await asyncio.sleep(25)
+            try:
+                await session.send_json({"type": "ping"})
+            except Exception:
+                break
+    except asyncio.CancelledError:
+        pass
 
 @router.websocket("/api/websocket")
 async def websocket_endpoint(websocket: WebSocket):
@@ -89,6 +102,9 @@ async def websocket_endpoint(websocket: WebSocket):
         session_manager.disconnect(session)
         return
 
+    # Start keepalive heartbeat task
+    keepalive_task = asyncio.create_task(session_keepalive(session))
+
     # 3. Handle commands loop
     try:
         while True:
@@ -99,6 +115,13 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd_id = msg.get("id")
             cmd_type = msg.get("type")
 
+            if cmd_type == "pong":
+                continue
+
+            if cmd_type == "ping" and cmd_id is None:
+                await session.send_json({"type": "pong"})
+                continue
+
             if not isinstance(cmd_id, int) or not cmd_type:
                 await session.send_json({
                     "type": "result",
@@ -107,22 +130,62 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
                 continue
 
-            await handle_command(session, cmd_id, cmd_type, msg)
+            try:
+                await handle_command(session, cmd_id, cmd_type, msg)
+            except Exception as cmd_err:
+                logger.error(f"Error handling WebSocket command '{cmd_type}' (id: {cmd_id}): {cmd_err}")
+                await session.send_json({
+                    "id": cmd_id,
+                    "type": "result",
+                    "success": False,
+                    "error": {"code": "internal_error", "message": f"Error executing command '{cmd_type}'."}
+                })
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for user {session.user_id}")
     except Exception as e:
         logger.error(f"WebSocket processing loop error: {e}")
     finally:
+        keepalive_task.cancel()
         session_manager.disconnect(session)
 
 async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str, Any]) -> None:
     user_id = session.user_id
 
-    if cmd_type == "ping":
+    if cmd_type == "auth/current_user":
+        async with async_session_maker() as db:
+            stmt = select(User).where(User.id == user_id)
+            res = await db.execute(stmt)
+            u = res.scalar_one_or_none()
+            user_name = (u.display_name or u.username) if u else f"User {user_id}"
+            user_id_str = str(u.id) if u else str(user_id)
+
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": {
+                "id": user_id_str,
+                "name": user_name,
+                "is_owner": True,
+                "is_admin": True,
+                "credentials": [],
+                "mfa_modules": []
+            }
+        })
+
+    elif cmd_type == "ping":
         await session.send_json({
             "id": cmd_id,
             "type": "pong"
+        })
+
+    elif cmd_type == "supported_features":
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": None
         })
 
     elif cmd_type == "get_states":
@@ -234,6 +297,22 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
             }
         })
 
+    elif cmd_type == "frontend/get_translations":
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": {"resources": {}}
+        })
+
+    elif cmd_type == "manifest/list":
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": []
+        })
+
     elif cmd_type == "config/device_registry/list":
         async with async_session_maker() as db:
             from app.db.models import Device
@@ -323,6 +402,35 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
             "success": True,
             "result": {
                 "show_advanced_options": False
+            }
+        })
+
+    elif cmd_type == "persistent_notification/get":
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": []
+        })
+
+    elif cmd_type == "subscribe_trigger":
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": None
+        })
+
+    elif cmd_type == "call_service":
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": {
+                "context": {
+                    "id": f"ctx_{cmd_id}",
+                    "user_id": str(user_id)
+                }
             }
         })
 
