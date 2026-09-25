@@ -13,7 +13,7 @@ COPY package.json ./
 RUN npm install
 
 # Copy configuration and frontend source code
-COPY tsconfig.json vite.config.ts index.html ./
+COPY tsconfig.json vite.config.ts index.html server.ts ./
 COPY public ./public
 COPY src ./src
 
