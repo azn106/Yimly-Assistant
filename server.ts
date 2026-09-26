@@ -564,12 +564,33 @@ interface AuthCodeRecord {
 const authCodesStore: AuthCodeRecord[] = [];
 const refreshTokensStore: { token: string; user_id: number; client_id: string; expires_at: number; revoked: boolean }[] = [];
 
-const uploadsDir = path.join(process.cwd(), "uploads");
+const dataDir = process.env.DATA_DIR || (fs.existsSync("/data") ? "/data" : process.cwd());
+const uploadsDir = process.env.UPLOADS_DIR || path.join(dataDir, "uploads");
 const profilePicsDir = path.join(uploadsDir, "profile_pictures");
 if (!fs.existsSync(profilePicsDir)) {
   fs.mkdirSync(profilePicsDir, { recursive: true });
 }
-app.use("/uploads", express.static(uploadsDir));
+
+// Copy any legacy uploads to persistent directory
+const legacyProfilePicsDir = path.join(process.cwd(), "uploads", "profile_pictures");
+if (fs.existsSync(legacyProfilePicsDir) && path.resolve(legacyProfilePicsDir) !== path.resolve(profilePicsDir)) {
+  try {
+    const files = fs.readdirSync(legacyProfilePicsDir);
+    for (const file of files) {
+      const srcFile = path.join(legacyProfilePicsDir, file);
+      const dstFile = path.join(profilePicsDir, file);
+      if (fs.statSync(srcFile).isFile() && !fs.existsSync(dstFile)) {
+        fs.copyFileSync(srcFile, dstFile);
+      }
+    }
+  } catch (e) {
+    console.warn("Failed migrating legacy profile pictures in server.ts:", e);
+  }
+}
+
+app.use("/uploads", express.static(uploadsDir), (_req, res) => {
+  res.status(404).json({ detail: "File not found" });
+});
 
 const uploadStorage = multer.diskStorage({
   destination: (_req, _file, cb) => {
@@ -1389,6 +1410,27 @@ app.post(["/api/auth/profile/picture", "/api/auth/profile-picture"], authenticat
   if (!req.file) {
     return res.status(400).json({ detail: "No image file provided." });
   }
+
+  // Validate file content magic bytes
+  try {
+    const fileBuffer = fs.readFileSync(req.file.path);
+    const isJpeg = fileBuffer.length >= 3 && fileBuffer[0] === 0xff && fileBuffer[1] === 0xd8 && fileBuffer[2] === 0xff;
+    const isPng = fileBuffer.length >= 8 && fileBuffer[0] === 0x89 && fileBuffer[1] === 0x50 && fileBuffer[2] === 0x4e && fileBuffer[3] === 0x47;
+    const isWebp = fileBuffer.length >= 12 && fileBuffer.toString("ascii", 0, 4) === "RIFF" && fileBuffer.toString("ascii", 8, 12) === "WEBP";
+
+    if (!isJpeg && !isPng && !isWebp) {
+      if (fs.existsSync(req.file.path)) {
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
+      }
+      return res.status(400).json({ detail: "Corrupted or invalid image file content." });
+    }
+  } catch (err) {
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    }
+    return res.status(400).json({ detail: "Failed to read uploaded image file." });
+  }
+
   db = loadDB();
   const userIdx = db.users.findIndex((u) => u.id === req.user!.id);
   if (userIdx === -1) {
@@ -1397,9 +1439,14 @@ app.post(["/api/auth/profile/picture", "/api/auth/profile-picture"], authenticat
   const user = db.users[userIdx];
   if (user.profile_picture_url) {
     const oldFileName = path.basename(user.profile_picture_url);
-    const oldFilePath = path.join(process.cwd(), "uploads", "profile_pictures", oldFileName);
-    if (fs.existsSync(oldFilePath)) {
-      try { fs.unlinkSync(oldFilePath); } catch (e) {}
+    const checkPaths = [
+      path.join(profilePicsDir, oldFileName),
+      path.join(process.cwd(), "uploads", "profile_pictures", oldFileName)
+    ];
+    for (const oldFilePath of checkPaths) {
+      if (fs.existsSync(oldFilePath)) {
+        try { fs.unlinkSync(oldFilePath); } catch (e) {}
+      }
     }
   }
   const pictureUrl = `/uploads/profile_pictures/${req.file.filename}`;
@@ -1415,9 +1462,14 @@ app.delete(["/api/auth/profile/picture", "/api/auth/profile-picture"], authentic
     const user = db.users[userIdx];
     if (user.profile_picture_url) {
       const oldFileName = path.basename(user.profile_picture_url);
-      const oldFilePath = path.join(process.cwd(), "uploads", "profile_pictures", oldFileName);
-      if (fs.existsSync(oldFilePath)) {
-        try { fs.unlinkSync(oldFilePath); } catch (e) {}
+      const checkPaths = [
+        path.join(profilePicsDir, oldFileName),
+        path.join(process.cwd(), "uploads", "profile_pictures", oldFileName)
+      ];
+      for (const oldFilePath of checkPaths) {
+        if (fs.existsSync(oldFilePath)) {
+          try { fs.unlinkSync(oldFilePath); } catch (e) {}
+        }
       }
       db.users[userIdx].profile_picture_url = null;
       saveDB(db);

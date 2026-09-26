@@ -168,7 +168,23 @@ async def on_startup() -> None:
 
 # Persistent uploads directory setup
 uploads_path = settings.UPLOADS_DIR if settings.UPLOADS_DIR else os.path.join(os.getcwd(), "uploads")
-os.makedirs(os.path.join(uploads_path, "profile_pictures"), exist_ok=True)
+profile_pics_path = os.path.join(uploads_path, "profile_pictures")
+os.makedirs(profile_pics_path, exist_ok=True)
+
+# Copy any legacy uploaded profile pictures into persistent directory on startup
+legacy_path = os.path.join(os.getcwd(), "uploads", "profile_pictures")
+if os.path.exists(legacy_path) and os.path.abspath(legacy_path) != os.path.abspath(profile_pics_path):
+    try:
+        import shutil
+        for fname in os.listdir(legacy_path):
+            src_f = os.path.join(legacy_path, fname)
+            dst_f = os.path.join(profile_pics_path, fname)
+            if os.path.isfile(src_f) and not os.path.exists(dst_f):
+                shutil.copy2(src_f, dst_f)
+                logger.info(f"Migrated legacy profile picture {fname} to persistent volume {profile_pics_path}")
+    except Exception as e:
+        logger.warning(f"Error migrating legacy profile pictures: {e}")
+
 app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
 
 # Register endpoint routers

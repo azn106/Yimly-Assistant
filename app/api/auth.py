@@ -466,6 +466,13 @@ async def update_profile(
     return current_user
 
 
+def get_profile_pictures_dir() -> str:
+    base_uploads = settings.UPLOADS_DIR if settings.UPLOADS_DIR else os.path.join(os.getcwd(), "uploads")
+    profile_pics_dir = os.path.join(base_uploads, "profile_pictures")
+    os.makedirs(profile_pics_dir, exist_ok=True)
+    return profile_pics_dir
+
+
 @router.post("/api/auth/profile/picture", response_model=UserResponse)
 @router.post("/api/auth/profile-picture", response_model=UserResponse)
 async def upload_profile_picture(
@@ -512,24 +519,19 @@ async def upload_profile_picture(
             detail="Corrupted or invalid image file content."
         )
 
-    # Remove existing photo if present
+    # Remove existing photo if present across both persistent and legacy paths
     if current_user.profile_picture_url:
         old_file_name = os.path.basename(current_user.profile_picture_url)
-        old_file_path = os.path.join(
-            os.getcwd(),
-            "uploads",
-            "profile_pictures",
-            old_file_name
-        )
-
-        if os.path.exists(old_file_path):
-            try:
-                os.remove(old_file_path)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to delete old profile picture "
-                    f"{old_file_path}: {e}"
-                )
+        for check_dir in [get_profile_pictures_dir(), os.path.join(os.getcwd(), "uploads", "profile_pictures")]:
+            old_file_path = os.path.join(check_dir, old_file_name)
+            if os.path.exists(old_file_path):
+                try:
+                    os.remove(old_file_path)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to delete old profile picture "
+                        f"{old_file_path}: {e}"
+                    )
 
     # Generate safe server-side filename
     safe_ext = ext if ext in allowed_exts else ".jpg"
@@ -539,13 +541,7 @@ async def upload_profile_picture(
         f"{uuid.uuid4().hex[:8]}{safe_ext}"
     )
 
-    upload_dir = os.path.join(
-        os.getcwd(),
-        "uploads",
-        "profile_pictures"
-    )
-    os.makedirs(upload_dir, exist_ok=True)
-
+    upload_dir = get_profile_pictures_dir()
     target_path = os.path.join(upload_dir, unique_filename)
 
     with open(target_path, "wb") as f:
@@ -569,21 +565,16 @@ async def delete_profile_picture(
 ):
     if current_user.profile_picture_url:
         old_file_name = os.path.basename(current_user.profile_picture_url)
-        old_file_path = os.path.join(
-            os.getcwd(),
-            "uploads",
-            "profile_pictures",
-            old_file_name
-        )
-
-        if os.path.exists(old_file_path):
-            try:
-                os.remove(old_file_path)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to delete old profile picture "
-                    f"{old_file_path}: {e}"
-                )
+        for check_dir in [get_profile_pictures_dir(), os.path.join(os.getcwd(), "uploads", "profile_pictures")]:
+            old_file_path = os.path.join(check_dir, old_file_name)
+            if os.path.exists(old_file_path):
+                try:
+                    os.remove(old_file_path)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to delete old profile picture "
+                        f"{old_file_path}: {e}"
+                    )
 
         current_user.profile_picture_url = None
 
