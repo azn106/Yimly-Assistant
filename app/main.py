@@ -185,7 +185,30 @@ if os.path.exists(legacy_path) and os.path.abspath(legacy_path) != os.path.abspa
     except Exception as e:
         logger.warning(f"Error migrating legacy profile pictures: {e}")
 
-app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
+# Custom handler to serve /uploads files with primary persistent volume and legacy fallback
+@app.get("/uploads/{file_path:path}")
+async def serve_uploaded_file(file_path: str):
+    safe_path = os.path.normpath(file_path).lstrip("/\\")
+    if ".." in safe_path:
+        return JSONResponse(status_code=400, content={"detail": "Invalid file path"})
+
+    # Check primary persistent uploads directory
+    primary_file = os.path.join(uploads_path, safe_path)
+    if os.path.isfile(primary_file):
+        return FileResponse(primary_file)
+
+    # Fallback to legacy working directory uploads (e.g. /app/uploads/...)
+    legacy_file = os.path.join(os.getcwd(), "uploads", safe_path)
+    if os.path.isfile(legacy_file):
+        try:
+            os.makedirs(os.path.dirname(primary_file), exist_ok=True)
+            import shutil
+            shutil.copy2(legacy_file, primary_file)
+        except Exception as e:
+            logger.warning(f"Failed to auto-migrate legacy upload file {safe_path}: {e}")
+        return FileResponse(primary_file if os.path.isfile(primary_file) else legacy_file)
+
+    return JSONResponse(status_code=404, content={"detail": "File not found"})
 
 # Register endpoint routers
 app.include_router(auth.router)

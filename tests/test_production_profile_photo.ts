@@ -219,7 +219,11 @@ async function runProductionProfilePhotoTests() {
   if (!serveRes.rawBuffer || serveRes.rawBuffer.length === 0) {
     throw new Error(`Image served from ${photoUrl} was empty!`);
   }
-  console.log(`✓ Uploaded image served successfully with HTTP 200 OK (${serveRes.rawBuffer.length} bytes).`);
+  const contentType = String(serveRes.headers["content-type"] || "").toLowerCase();
+  if (!contentType.includes("image/")) {
+    throw new Error(`Expected Content-Type image/* for photo, got: ${contentType}`);
+  }
+  console.log(`✓ Uploaded image served successfully with HTTP 200 OK (${serveRes.rawBuffer.length} bytes, Content-Type: ${contentType}).`);
 
   // 9. Test Photo Persistence Across Re-login
   console.log("\n9. Testing photo persistence across user re-login...");

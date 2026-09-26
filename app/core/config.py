@@ -36,7 +36,9 @@ if not settings.DATABASE_URL:
 
 # Configure default UPLOADS_DIR if empty
 if not settings.UPLOADS_DIR:
-    settings.UPLOADS_DIR = os.path.join(settings.DATA_DIR, "uploads")
+    settings.UPLOADS_DIR = os.path.abspath(os.path.join(settings.DATA_DIR, "uploads"))
+else:
+    settings.UPLOADS_DIR = os.path.abspath(settings.UPLOADS_DIR)
 
 # Post-processing secret key if not set
 if not settings.JWT_SECRET_KEY:

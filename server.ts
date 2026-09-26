@@ -588,7 +588,30 @@ if (fs.existsSync(legacyProfilePicsDir) && path.resolve(legacyProfilePicsDir) !=
   }
 }
 
-app.use("/uploads", express.static(uploadsDir), (_req, res) => {
+app.use("/uploads", (req, res) => {
+  const relPath = req.path || "";
+  const safeRelPath = path.normalize(relPath).replace(/^(\.\.[\/\\])+/, "");
+  if (safeRelPath.includes("..")) {
+    return res.status(400).json({ detail: "Invalid file path" });
+  }
+
+  const primaryFile = path.join(uploadsDir, safeRelPath);
+  if (fs.existsSync(primaryFile) && fs.statSync(primaryFile).isFile()) {
+    return res.sendFile(primaryFile);
+  }
+
+  const legacyFile = path.join(process.cwd(), "uploads", safeRelPath);
+  if (fs.existsSync(legacyFile) && fs.statSync(legacyFile).isFile()) {
+    try {
+      const dir = path.dirname(primaryFile);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(legacyFile, primaryFile);
+    } catch (e) {
+      console.warn("Failed auto-migrating legacy file in server.ts:", e);
+    }
+    return res.sendFile(primaryFile);
+  }
+
   res.status(404).json({ detail: "File not found" });
 });
 

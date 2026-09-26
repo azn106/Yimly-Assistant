@@ -382,6 +382,12 @@ export default function App() {
     };
   }, []);
 
+  // WebSocket instance and stable function references
+  const wsRef = useRef<WebSocket | null>(null);
+  const fetchCircleMembersRef = useRef<((circleId: number, silent?: boolean) => Promise<void>) | null>(null);
+  const fetchAlertsRef = useRef(fetchAlerts);
+  fetchAlertsRef.current = fetchAlerts;
+
   // Live WebSocket Connection to Home Assistant backend
   useEffect(() => {
     if (status !== "authenticated") return;
@@ -389,7 +395,6 @@ export default function App() {
     if (!token) return;
 
     let isSubscribed = true;
-    let ws: WebSocket | null = null;
     let reconnectTimeout: any = null;
 
     const connectWebSocket = () => {
@@ -399,7 +404,8 @@ export default function App() {
       const wsUrl = `${wsProtocol}//${window.location.host}/api/websocket`;
 
       try {
-        ws = new WebSocket(wsUrl);
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
 
         ws.onopen = () => {
           console.log("[HA WebSocket] Connected to /api/websocket");
@@ -409,26 +415,30 @@ export default function App() {
           try {
             const data = JSON.parse(event.data);
 
-            if (data.type === "auth_required") {
+            if (data.type === "ping") {
+              const pongPayload: any = { type: "pong" };
+              if (data.id !== undefined) pongPayload.id = data.id;
+              ws.send(JSON.stringify(pongPayload));
+            } else if (data.type === "auth_required") {
               // Complete handshake challenge with access token
-              ws?.send(JSON.stringify({ type: "auth", access_token: token }));
+              ws.send(JSON.stringify({ type: "auth", access_token: token }));
             } else if (data.type === "auth_ok") {
               console.log("[HA WebSocket] Auth successful (auth_ok). Notifying Companion App.");
               // Notify Android / iOS Companion App via External Bus that frontend is connected
               notifyExternalBus("connection-status", { event: "connected" });
 
               // Subscribe to state change events for real-time live map updates
-              ws?.send(JSON.stringify({ id: 1, type: "subscribe_events", event_type: "state_changed" }));
-              ws?.send(JSON.stringify({ id: 2, type: "get_states" }));
-              ws?.send(JSON.stringify({ id: 3, type: "get_config" }));
+              ws.send(JSON.stringify({ id: 1, type: "subscribe_events", event_type: "state_changed" }));
+              ws.send(JSON.stringify({ id: 2, type: "get_states" }));
+              ws.send(JSON.stringify({ id: 3, type: "get_config" }));
             } else if (data.type === "auth_invalid") {
               console.warn("[HA WebSocket] Auth invalid.");
               notifyExternalBus("connection-status", { event: "auth-invalid" });
             } else if (data.type === "event" && data.event?.event_type === "state_changed") {
               // Real-time entity state update received: silently refresh circle members & alerts
               if (selectedCircleRef.current) {
-                fetchCircleMembers(selectedCircleRef.current.id, true);
-                fetchAlerts(selectedCircleRef.current.id, true);
+                fetchCircleMembersRef.current?.(selectedCircleRef.current.id, true);
+                fetchAlertsRef.current(selectedCircleRef.current.id, true);
               }
             }
           } catch (err) {
@@ -436,9 +446,12 @@ export default function App() {
           }
         };
 
-        ws.onclose = () => {
-          console.log("[HA WebSocket] Connection closed.");
+        ws.onclose = (evt) => {
+          console.log("[HA WebSocket] Connection closed.", evt.code, evt.reason);
           notifyExternalBus("connection-status", { event: "disconnected" });
+          if (wsRef.current === ws) {
+            wsRef.current = null;
+          }
           if (isSubscribed) {
             reconnectTimeout = setTimeout(connectWebSocket, 4000);
           }
@@ -447,7 +460,7 @@ export default function App() {
         ws.onerror = (err) => {
           console.warn("[HA WebSocket] Connection error:", err);
           try {
-            ws?.close();
+            ws.close();
           } catch {}
         };
       } catch (e) {
@@ -463,13 +476,15 @@ export default function App() {
     return () => {
       isSubscribed = false;
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      if (ws) {
+      if (wsRef.current) {
+        const socketToClose = wsRef.current;
+        wsRef.current = null;
         try {
-          ws.close();
+          socketToClose.close();
         } catch {}
       }
     };
-  }, [status, fetchAlerts]);
+  }, [status]);
 
   // Run on mount to check existing session, setup status, and register SW
   useEffect(() => {
@@ -536,7 +551,12 @@ export default function App() {
         sessionStorage.setItem("companion_auth_url", authUrl);
         localStorage.setItem("companion_auth_url", authUrl);
       }
+    }
 
+    const token = localStorage.getItem("access_token");
+
+    // If an external-auth bridge is present but no token is in localStorage, perform exchange first
+    if (isExternalAuth && !token) {
       try {
         const externalToken = await requestExternalAuthToken();
         if (externalToken) {
@@ -545,15 +565,22 @@ export default function App() {
       } catch (extErr) {
         console.warn("[ExternalAuth] Error during external auth exchange:", extErr);
       }
+    } else if (isExternalAuth) {
+      // Async token sync in background (non-blocking)
+      requestExternalAuthToken().then((externalToken) => {
+        if (externalToken) {
+          localStorage.setItem("access_token", externalToken);
+        }
+      }).catch(() => {});
     }
 
-    const token = localStorage.getItem("access_token");
+    const activeToken = localStorage.getItem("access_token");
 
-    if (token) {
+    if (activeToken) {
       try {
         const res = await fetch("/api/auth/me", {
           headers: {
-            Authorization: `Bearer ${token}`
+            Authorization: `Bearer ${activeToken}`
           }
         });
 
@@ -562,7 +589,7 @@ export default function App() {
           localStorage.setItem("user_info", JSON.stringify(fetchedUser));
           setUser(fetchedUser);
           setStatus("authenticated");
-          await fetchCircles(token);
+          await fetchCircles(activeToken);
           return;
         } else {
           localStorage.removeItem("access_token");
