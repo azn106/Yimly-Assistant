@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from sqlalchemy import select, delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Device, LocationHistory, SensorRegistration, User
 from app.schemas.telemetry import LocationUpdateData, SensorRegistrationData, SensorStateUpdate
@@ -324,26 +325,31 @@ class TelemetryService:
         dev_slug = slugify(device.device_name) or f"device_{device.id}"
         sensor_slug = slugify(data.name) or slugify(data.unique_id)
         domain = data.type if data.type in ["sensor", "binary_sensor"] else "sensor"
-        entity_id = f"{domain}.{dev_slug}_{sensor_slug}"
+        default_entity_id = f"{domain}.{dev_slug}_{sensor_slug}"
 
         stmt = select(SensorRegistration).where(
-            SensorRegistration.device_id == device.id,
             SensorRegistration.unique_id == data.unique_id
         )
         result = await db.execute(stmt)
         reg = result.scalar_one_or_none()
 
         if reg:
-            # Update metadata
+            # Update metadata and preserve correct ownership/device/user association
+            reg.device_id = device.id
+            reg.user_id = device.user_id
             reg.name = data.name
-            reg.entity_id = entity_id
+            if not reg.entity_id:
+                reg.entity_id = default_entity_id
             reg.unit_of_measurement = data.unit_of_measurement
             reg.icon = data.icon
             reg.device_class = data.device_class
             reg.state_class = data.state_class
             reg.entity_category = data.entity_category
-            reg.disabled = data.disabled
+            if data.disabled is not None:
+                reg.disabled = data.disabled
+            entity_id = reg.entity_id
         else:
+            entity_id = default_entity_id
             reg = SensorRegistration(
                 unique_id=data.unique_id,
                 device_id=device.id,
@@ -355,11 +361,37 @@ class TelemetryService:
                 device_class=data.device_class,
                 state_class=data.state_class,
                 entity_category=data.entity_category,
-                disabled=data.disabled
+                disabled=data.disabled if data.disabled is not None else False
             )
             db.add(reg)
 
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            # If a race condition occurred, re-query by unique_id and update
+            stmt = select(SensorRegistration).where(
+                SensorRegistration.unique_id == data.unique_id
+            )
+            result = await db.execute(stmt)
+            reg = result.scalar_one_or_none()
+            if reg:
+                reg.device_id = device.id
+                reg.user_id = device.user_id
+                reg.name = data.name
+                if not reg.entity_id:
+                    reg.entity_id = default_entity_id
+                reg.unit_of_measurement = data.unit_of_measurement
+                reg.icon = data.icon
+                reg.device_class = data.device_class
+                reg.state_class = data.state_class
+                reg.entity_category = data.entity_category
+                if data.disabled is not None:
+                    reg.disabled = data.disabled
+                await db.commit()
+                entity_id = reg.entity_id
+            else:
+                raise
 
         # Initialize or register entity state if it does not exist
         now_state = await StateService.get_state(db, device.user_id, entity_id)
@@ -395,7 +427,6 @@ class TelemetryService:
         for item in updates:
             # Check registration for this unique_id
             stmt = select(SensorRegistration).where(
-                SensorRegistration.device_id == device.id,
                 SensorRegistration.unique_id == item.unique_id
             )
             result = await db.execute(stmt)
