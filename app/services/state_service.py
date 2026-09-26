@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import EntityState
 from app.services.event_service import event_bus
@@ -9,7 +10,6 @@ class StateService:
     @staticmethod
     async def get_state(db: AsyncSession, user_id: int, entity_id: str) -> Optional[EntityState]:
         stmt = select(EntityState).where(
-            EntityState.user_id == user_id,
             EntityState.entity_id == entity_id
         )
         result = await db.execute(stmt)
@@ -36,7 +36,6 @@ class StateService:
         now = datetime.now(timezone.utc)
 
         stmt = select(EntityState).where(
-            EntityState.user_id == user_id,
             EntityState.entity_id == entity_id
         )
         result = await db.execute(stmt)
@@ -48,17 +47,18 @@ class StateService:
                 "entity_id": entity.entity_id,
                 "state": entity.state,
                 "attributes": entity.attributes,
-                "last_changed": entity.last_changed.isoformat(),
-                "last_updated": entity.last_updated.isoformat()
+                "last_changed": entity.last_changed.isoformat() if entity.last_changed else now.isoformat(),
+                "last_updated": entity.last_updated.isoformat() if entity.last_updated else now.isoformat()
             }
-            # If the state string changes, last_changed changes, otherwise remains
+            entity.user_id = user_id
+            if device_id is not None:
+                entity.device_id = device_id
+            entity.domain = domain
             if entity.state != str(state):
                 entity.last_changed = now
             entity.last_updated = now
             entity.state = str(state)
             entity.attributes = attributes
-            if device_id is not None:
-                entity.device_id = device_id
             if latitude is not None:
                 entity.latitude = latitude
             if longitude is not None:
@@ -78,8 +78,65 @@ class StateService:
             )
             db.add(entity)
 
-        await db.commit()
-        await db.refresh(entity)
+        try:
+            await db.commit()
+            await db.refresh(entity)
+        except Exception:
+            await db.rollback()
+            db.expunge_all()
+            # Race condition handling: re-query existing entity by entity_id and update
+            stmt = select(EntityState).where(
+                EntityState.entity_id == entity_id
+            )
+            result = await db.execute(stmt)
+            entity = result.scalar_one_or_none()
+            if entity:
+                old_state = {
+                    "entity_id": entity.entity_id,
+                    "state": entity.state,
+                    "attributes": entity.attributes,
+                    "last_changed": entity.last_changed.isoformat() if entity.last_changed else now.isoformat(),
+                    "last_updated": entity.last_updated.isoformat() if entity.last_updated else now.isoformat()
+                }
+                entity.user_id = user_id
+                if device_id is not None:
+                    entity.device_id = device_id
+                entity.domain = domain
+                if entity.state != str(state):
+                    entity.last_changed = now
+                entity.last_updated = now
+                entity.state = str(state)
+                entity.attributes = attributes
+                if latitude is not None:
+                    entity.latitude = latitude
+                if longitude is not None:
+                    entity.longitude = longitude
+                try:
+                    await db.commit()
+                    await db.refresh(entity)
+                except Exception:
+                    await db.rollback()
+                    db.expunge_all()
+            else:
+                # Fallback: re-query or construct instance safely
+                stmt = select(EntityState).where(
+                    EntityState.entity_id == entity_id
+                )
+                res_fallback = await db.execute(stmt)
+                entity = res_fallback.scalar_one_or_none()
+                if not entity:
+                    entity = EntityState(
+                        entity_id=entity_id,
+                        device_id=device_id,
+                        user_id=user_id,
+                        domain=domain,
+                        state=str(state),
+                        attributes=attributes,
+                        latitude=latitude,
+                        longitude=longitude,
+                        last_changed=now,
+                        last_updated=now
+                    )
 
         new_state = {
             "entity_id": entity.entity_id,

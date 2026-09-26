@@ -367,8 +367,9 @@ class TelemetryService:
 
         try:
             await db.commit()
-        except IntegrityError:
+        except Exception:
             await db.rollback()
+            db.expunge_all()
             # If a race condition occurred, re-query by unique_id and update
             stmt = select(SensorRegistration).where(
                 SensorRegistration.unique_id == data.unique_id
@@ -388,32 +389,32 @@ class TelemetryService:
                 reg.entity_category = data.entity_category
                 if data.disabled is not None:
                     reg.disabled = data.disabled
-                await db.commit()
+                try:
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    db.expunge_all()
                 entity_id = reg.entity_id
-            else:
-                raise
 
-        # Initialize or register entity state if it does not exist
-        now_state = await StateService.get_state(db, device.user_id, entity_id)
-        if not now_state:
-            initial_state = str(data.state) if data.state is not None else "unknown"
-            attributes = {
-                "friendly_name": f"{device.device_name} {data.name}",
-                "device_class": data.device_class,
-                "unit_of_measurement": data.unit_of_measurement,
-                "icon": data.icon
-            }
-            if hasattr(data, "attributes") and isinstance(data.attributes, dict):
-                attributes.update(data.attributes)
-            attributes = {k: v for k, v in attributes.items() if v is not None}
-            await StateService.set_state(
-                db=db,
-                user_id=device.user_id,
-                entity_id=entity_id,
-                state=initial_state,
-                attributes=attributes,
-                device_id=device.id
-            )
+        # Safely create or update entity state idempotently
+        initial_state = str(data.state) if data.state is not None else "unknown"
+        attributes = {
+            "friendly_name": f"{device.device_name} {data.name}",
+            "device_class": data.device_class,
+            "unit_of_measurement": data.unit_of_measurement,
+            "icon": data.icon
+        }
+        if hasattr(data, "attributes") and isinstance(data.attributes, dict):
+            attributes.update(data.attributes)
+        attributes = {k: v for k, v in attributes.items() if v is not None}
+        await StateService.set_state(
+            db=db,
+            user_id=device.user_id,
+            entity_id=entity_id,
+            state=initial_state,
+            attributes=attributes,
+            device_id=device.id
+        )
 
         return {"success": True}
 

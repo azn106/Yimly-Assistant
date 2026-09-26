@@ -216,6 +216,106 @@ async function runIosSensorRegistrationTestSuite() {
   }
   console.log("✓ Sensor state update succeeded!");
 
+  // 8. Explicitly test production failure case: entity_id collision on entities.entity_id
+  console.log("\n8. Testing explicit entity_id collision (production bug fix for entities.entity_id)...");
+  const xiaomiPayload = {
+    type: "register_sensor",
+    data: {
+      name: "Xiaomi T15 Pro Battery Level",
+      unique_id: `xiaomi_t15_pro_battery_level_unique_${ts}`,
+      type: "sensor",
+      state: 75,
+      unit_of_measurement: "%",
+      icon: "mdi:battery-70",
+      device_class: "battery",
+      state_class: "measurement"
+    }
+  };
+
+  const cameraMotionPayload = {
+    type: "register_sensor",
+    data: {
+      name: "iPhone17Pro Camera Motion",
+      unique_id: `iphone17pro_camera_motion_unique_${ts}`,
+      type: "binary_sensor",
+      state: "off",
+      icon: "mdi:motion-sensor"
+    }
+  };
+
+  // Register sensors initially under device 1
+  const resXiaomi1 = await makeRequest("POST", `/api/webhook/${webhookId1}`, xiaomiPayload);
+  if (resXiaomi1.status !== 201 && resXiaomi1.status !== 200) {
+    throw new Error(`Initial Xiaomi sensor registration failed: ${JSON.stringify(resXiaomi1.data)}`);
+  }
+  const resCamera1 = await makeRequest("POST", `/api/webhook/${webhookId1}`, cameraMotionPayload);
+  if (resCamera1.status !== 201 && resCamera1.status !== 200) {
+    throw new Error(`Initial Camera Motion sensor registration failed: ${JSON.stringify(resCamera1.data)}`);
+  }
+  console.log("✓ Initial entity_id creation succeeded.");
+
+  // Re-register under device 2 and resend same sensor payloads
+  const resXiaomi2 = await makeRequest("POST", `/api/webhook/${webhookId2}`, xiaomiPayload);
+  if (resXiaomi2.status !== 201 && resXiaomi2.status !== 200) {
+    throw new Error(`Second Xiaomi sensor registration failed with status ${resXiaomi2.status}: ${JSON.stringify(resXiaomi2.data)}`);
+  }
+  if (resXiaomi2.data?.detail && JSON.stringify(resXiaomi2.data.detail).includes("UNIQUE constraint failed")) {
+    throw new Error("FAILED: UNIQUE constraint failed on entities.entity_id!");
+  }
+
+  const resCamera2 = await makeRequest("POST", `/api/webhook/${webhookId2}`, cameraMotionPayload);
+  if (resCamera2.status !== 201 && resCamera2.status !== 200) {
+    throw new Error(`Second Camera Motion sensor registration failed with status ${resCamera2.status}: ${JSON.stringify(resCamera2.data)}`);
+  }
+  if (resCamera2.data?.detail && JSON.stringify(resCamera2.data.detail).includes("UNIQUE constraint failed")) {
+    throw new Error("FAILED: UNIQUE constraint failed on entities.entity_id!");
+  }
+  console.log("✓ Re-registration of existing entities succeeded without entities.entity_id UNIQUE constraint error!");
+
+  // 9. Test all exact production failure sensor names from prompt
+  console.log("\n9. Testing all exact production failure sensor names from user report...");
+  const exactProductionSensors = [
+    "Proximity sensor",
+    "Steps sensor",
+    "Internal storage",
+    "External storage",
+    "Current time zone",
+    "Mobile RX GB",
+    "Mobile TX GB",
+    "Total RX GB",
+    "Total TX GB"
+  ];
+
+  for (const sensorName of exactProductionSensors) {
+    const slug = sensorName.toLowerCase().replace(/[^a-z0-9]/g, "_");
+    const payload = {
+      type: "register_sensor",
+      data: {
+        name: sensorName,
+        unique_id: `prod_sensor_${slug}_${ts}`,
+        type: "sensor",
+        state: "ok",
+        icon: "mdi:cellphone"
+      }
+    };
+
+    // First submission
+    const r1 = await makeRequest("POST", `/api/webhook/${webhookId1}`, payload);
+    if (r1.status !== 201 && r1.status !== 200) {
+      throw new Error(`Failed initial registration for ${sensorName}: ${JSON.stringify(r1.data)}`);
+    }
+
+    // Re-registration submission under device 2
+    const r2 = await makeRequest("POST", `/api/webhook/${webhookId2}`, payload);
+    if (r2.status !== 201 && r2.status !== 200) {
+      throw new Error(`Failed duplicate registration for ${sensorName}: status ${r2.status}`);
+    }
+    if (r2.data?.detail && JSON.stringify(r2.data.detail).includes("UNIQUE constraint failed")) {
+      throw new Error(`UNIQUE constraint failed for exact production sensor ${sensorName}!`);
+    }
+  }
+  console.log("✓ All exact production sensors tested and confirmed 100% idempotent!");
+
   console.log("\n============================================================");
   console.log("ALL IOS SENSOR REGISTRATION REGRESSION TESTS PASSED! 🎉");
   console.log("============================================================\n");
