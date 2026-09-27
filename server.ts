@@ -109,11 +109,13 @@ export interface CircleMemberData {
 export interface EntityStateData {
   entity_id: string;
   user_id: number;
+  device_id?: number;
   domain: string;
   state: string;
   attributes: Record<string, any>;
   latitude?: number | null;
   longitude?: number | null;
+  last_changed?: string;
   last_updated: string;
 }
 
@@ -187,6 +189,7 @@ export interface YimlyPreviewDatabase {
   device_battery_states: DeviceBatteryStateData[];
   device_offline_states: DeviceOfflineStateData[];
   devices: any[];
+  sensor_registrations?: any[];
 }
 
 
@@ -491,7 +494,8 @@ function loadDB(): YimlyPreviewDatabase {
       geofence_states: [],
       device_battery_states: [],
       device_offline_states: [],
-      devices: []
+      devices: [],
+      sensor_registrations: []
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(initialDB, null, 2));
     return initialDB;
@@ -514,7 +518,8 @@ function loadDB(): YimlyPreviewDatabase {
       geofence_states: parsed.geofence_states || [],
       device_battery_states: parsed.device_battery_states || [],
       device_offline_states: parsed.device_offline_states || [],
-      devices: parsed.devices || []
+      devices: parsed.devices || [],
+      sensor_registrations: parsed.sensor_registrations || []
     };
 
     // If loaded history was empty or upgraded, persist it
@@ -649,27 +654,183 @@ const server = http.createServer(app);
 
 // WebSocket Setup for Real-time Core updates
 const wss = new WebSocketServer({ noServer: true });
-const connectedClients = new Set<WebSocket>();
+
+interface EntityFilterCriteria {
+  entityIds?: Set<string>;
+  includeDomains?: Set<string>;
+  includeEntities?: Set<string>;
+  includeGlobs?: RegExp[];
+  excludeDomains?: Set<string>;
+  excludeEntities?: Set<string>;
+  excludeGlobs?: RegExp[];
+}
+
+function globToRegex(glob: string): RegExp {
+  const escaped = glob
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`);
+}
+
+function parseEntityFilter(msg: any): EntityFilterCriteria {
+  const criteria: EntityFilterCriteria = {};
+
+  if (Array.isArray(msg.entity_ids) && msg.entity_ids.length > 0) {
+    criteria.entityIds = new Set(msg.entity_ids.map(String));
+  }
+
+  const inc = (typeof msg.include === "object" && msg.include !== null) ? msg.include : {};
+  const exc = (typeof msg.exclude === "object" && msg.exclude !== null) ? msg.exclude : {};
+
+  const ensureArray = (v: any): string[] => {
+    if (Array.isArray(v)) return v.map(String);
+    if (typeof v === "string") return [v];
+    return [];
+  };
+
+  const incDomains = ensureArray(inc.domains || msg.include_domains);
+  if (incDomains.length > 0) criteria.includeDomains = new Set(incDomains);
+
+  const incEntities = ensureArray(inc.entities || msg.include_entities);
+  if (incEntities.length > 0) criteria.includeEntities = new Set(incEntities);
+
+  const incGlobs = ensureArray(inc.entity_globs || msg.include_entity_globs);
+  if (incGlobs.length > 0) criteria.includeGlobs = incGlobs.map(globToRegex);
+
+  const excDomains = ensureArray(exc.domains || msg.exclude_domains);
+  if (excDomains.length > 0) criteria.excludeDomains = new Set(excDomains);
+
+  const excEntities = ensureArray(exc.entities || msg.exclude_entities);
+  if (excEntities.length > 0) criteria.excludeEntities = new Set(excEntities);
+
+  const excGlobs = ensureArray(exc.entity_globs || msg.exclude_entity_globs);
+  if (excGlobs.length > 0) criteria.excludeGlobs = excGlobs.map(globToRegex);
+
+  return criteria;
+}
+
+function matchesEntityFilter(entityId: string, filter: EntityFilterCriteria): boolean {
+  if (filter.entityIds && !filter.entityIds.has(entityId)) {
+    return false;
+  }
+
+  const haveInclude = Boolean(
+    filter.includeEntities?.size ||
+    filter.includeDomains?.size ||
+    filter.includeGlobs?.length
+  );
+  const haveExclude = Boolean(
+    filter.excludeEntities?.size ||
+    filter.excludeDomains?.size ||
+    filter.excludeGlobs?.length
+  );
+
+  if (!haveInclude && !haveExclude) {
+    return true;
+  }
+
+  const domain = entityId.includes(".") ? entityId.split(".")[0] : "";
+
+  // Case 2: Only includes
+  if (haveInclude && !haveExclude) {
+    if (filter.includeEntities?.has(entityId)) return true;
+    if (filter.includeDomains?.has(domain)) return true;
+    if (filter.includeGlobs?.some(r => r.test(entityId))) return true;
+    return false;
+  }
+
+  // Case 3: Only excludes
+  if (!haveInclude && haveExclude) {
+    if (filter.excludeEntities?.has(entityId)) return false;
+    if (filter.excludeDomains?.has(domain)) return false;
+    if (filter.excludeGlobs?.some(r => r.test(entityId))) return false;
+    return true;
+  }
+
+  // Case 4: Both includes and excludes
+  if (filter.includeDomains?.size || filter.includeGlobs?.length) {
+    if (filter.includeEntities?.has(entityId)) return true;
+    if (filter.excludeEntities?.has(entityId)) return false;
+    if (filter.includeGlobs?.some(r => r.test(entityId))) return true;
+    if (filter.includeDomains?.has(domain) && !filter.excludeGlobs?.some(r => r.test(entityId))) {
+      return true;
+    }
+    return false;
+  }
+
+  // Case 5: Domain and/or glob excludes (no domain/glob includes)
+  if (filter.excludeDomains?.size || filter.excludeGlobs?.length) {
+    if (filter.excludeDomains?.has(domain) || filter.excludeGlobs?.some(r => r.test(entityId))) {
+      return Boolean(filter.includeEntities?.has(entityId));
+    }
+    return !filter.excludeEntities?.has(entityId);
+  }
+
+  return Boolean(filter.includeEntities?.has(entityId) && !filter.excludeEntities?.has(entityId));
+}
+
+interface ClientSession {
+  id: string;
+  ws: WebSocket;
+  userId: number | null;
+  connectedAt: number;
+  lastReceivedType: string | null;
+  lastReceivedId: number | null;
+  lastSentType: string | null;
+  lastSentId: number | null;
+  eventSubs: Map<number, string>;
+  entitySubs: Map<number, EntityFilterCriteria>;
+}
+const clientSessions = new Map<WebSocket, ClientSession>();
 
 // Keepalive heartbeat every 25 seconds to keep proxies and clients alive
 setInterval(() => {
-  connectedClients.forEach((ws) => {
-    if (ws.readyState === WebSocket.OPEN) {
+  clientSessions.forEach((session) => {
+    if (session.ws.readyState === WebSocket.OPEN) {
       try {
-        ws.ping();
+        session.ws.ping();
       } catch {}
     }
   });
 }, 25000);
 
 wss.on("connection", (ws: WebSocket) => {
-  connectedClients.add(ws);
-  let authenticatedUserId: number | null = null;
-  ws.send(JSON.stringify({ type: "auth_required", ha_version: "2026.9.1" }));
+  const sessionId = crypto.randomBytes(4).toString("hex");
+  const session: ClientSession = {
+    id: sessionId,
+    ws,
+    userId: null,
+    connectedAt: Date.now(),
+    lastReceivedType: null,
+    lastReceivedId: null,
+    lastSentType: null,
+    lastSentId: null,
+    eventSubs: new Map(),
+    entitySubs: new Map()
+  };
+  clientSessions.set(ws, session);
+
+  const sendResponse = (msg: any) => {
+    if (msg && typeof msg === "object") {
+      session.lastSentType = msg.type || null;
+      session.lastSentId = typeof msg.id === "number" ? msg.id : null;
+    }
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
+  };
+
+  sendResponse({ type: "auth_required", ha_version: "2026.9.1" });
 
   ws.on("message", (message: string) => {
     try {
       const data = JSON.parse(message.toString());
+      if (data && typeof data === "object") {
+        session.lastReceivedType = data.type || null;
+        session.lastReceivedId = typeof data.id === "number" ? data.id : null;
+      }
+
       if (data.type === "pong") {
         return;
       }
@@ -679,17 +840,17 @@ wss.on("connection", (ws: WebSocket) => {
           try {
             const decoded: any = jwt.verify(token, JWT_SECRET);
             if (decoded && decoded.sub) {
-              authenticatedUserId = Number(decoded.sub);
+              session.userId = Number(decoded.sub);
             }
           } catch {}
         }
-        ws.send(JSON.stringify({ type: "auth_ok", ha_version: "2026.9.1" }));
-      } else if (data.type === "auth/current_user") {
+        sendResponse({ type: "auth_ok", ha_version: "2026.9.1" });
+      } else if (data.type === "auth/current_user" || data.type === "user/current") {
         db = loadDB();
-        const u = authenticatedUserId ? db.users.find((user: any) => user.id === authenticatedUserId) : (db.users[0] || null);
-        const userName = u ? (u.display_name || u.username) : (authenticatedUserId ? `User ${authenticatedUserId}` : "User");
-        const userIdStr = u ? String(u.id) : (authenticatedUserId ? String(authenticatedUserId) : "1");
-        ws.send(JSON.stringify({
+        const u = session.userId ? db.users.find((user: any) => user.id === session.userId) : (db.users[0] || null);
+        const userName = u ? (u.display_name || u.username) : (session.userId ? `User ${session.userId}` : "User");
+        const userIdStr = u ? String(u.id) : (session.userId ? String(session.userId) : "1");
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
@@ -701,33 +862,100 @@ wss.on("connection", (ws: WebSocket) => {
             credentials: [],
             mfa_modules: []
           }
-        }));
+        });
       } else if (data.type === "ping") {
-        ws.send(JSON.stringify(data.id !== undefined ? { id: data.id, type: "pong" } : { type: "pong" }));
+        sendResponse(data.id !== undefined ? { id: data.id, type: "pong" } : { type: "pong" });
       } else if (data.type === "supported_features") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+        sendResponse({ id: data.id, type: "result", success: true, result: null });
       } else if (data.type === "subscribe_events") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
-      } else if (data.type === "unsubscribe_events") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
-      } else if (data.type === "subscribe_trigger") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+        if (session.eventSubs.has(data.id) || session.entitySubs.has(data.id)) {
+          sendResponse({
+            id: data.id,
+            type: "result",
+            success: false,
+            error: { code: "id_reuse", message: "Identifier values have to increase." }
+          });
+          return;
+        }
+        session.eventSubs.set(data.id, data.event_type || "state_changed");
+        sendResponse({ id: data.id, type: "result", success: true, result: null });
+      } else if (data.type === "subscribe_entities") {
+        if (session.eventSubs.has(data.id) || session.entitySubs.has(data.id)) {
+          sendResponse({
+            id: data.id,
+            type: "result",
+            success: false,
+            error: { code: "id_reuse", message: "Identifier values have to increase." }
+          });
+          return;
+        }
+
+        const filter = parseEntityFilter(data);
+        session.entitySubs.set(data.id, filter);
+
+        db = loadDB();
+        const initialEntities: Record<string, any> = {};
+        const nowTs = Date.now() / 1000;
+        const userEntities = (db.entity_states || []).filter((e: any) => !session.userId || e.user_id === session.userId);
+
+        userEntities.forEach((e: any) => {
+          if (!matchesEntityFilter(e.entity_id, filter)) {
+            return;
+          }
+          const lc = typeof e.last_changed === "string" ? new Date(e.last_changed).getTime() / 1000 : nowTs;
+          const lu = typeof e.last_updated === "string" ? new Date(e.last_updated).getTime() / 1000 : lc;
+
+          const entry: Record<string, any> = {
+            s: String(e.state != null ? e.state : "unknown"),
+            a: e.attributes || {},
+            c: `ctx_${e.entity_id}`,
+            lc: lc
+          };
+          if (lu !== lc) {
+            entry.lu = lu;
+          }
+          initialEntities[e.entity_id] = entry;
+        });
+
+        // 1. Send subscription result confirmation first
+        sendResponse({ id: data.id, type: "result", success: true, result: null });
+        // 2. Send initial entity snapshot under 'a'
+        sendResponse({ id: data.id, type: "event", event: { a: initialEntities } });
+      } else if (data.type === "unsubscribe_events" || data.type === "unsubscribe_entities") {
+        const subId = data.subscription;
+        if (typeof subId === "number" && (session.eventSubs.has(subId) || session.entitySubs.has(subId))) {
+          session.eventSubs.delete(subId);
+          session.entitySubs.delete(subId);
+          sendResponse({ id: data.id, type: "result", success: true, result: null });
+        } else {
+          sendResponse({
+            id: data.id,
+            type: "result",
+            success: false,
+            error: { code: "not_found", message: "Subscription not found." }
+          });
+        }
+      } else if (data.type === "subscribe_trigger" || data.type === "persistent_notification/subscribe" ||
+                 data.type === "mobile_app/push_notification_channel" || data.type === "mobile_app/push_notification_confirm" ||
+                 data.type === "mobile_app/get_push_notifications" || data.type === "sensor/push" ||
+                 data.type === "camera/stream" || data.type === "render_template") {
+        sendResponse({ id: data.id, type: "result", success: true, result: null });
       } else if (data.type === "persistent_notification/get") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: [] }));
+        sendResponse({ id: data.id, type: "result", success: true, result: [] });
       } else if (data.type === "call_service") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
           result: {
             context: {
               id: `ctx_${data.id}`,
-              user_id: authenticatedUserId ? String(authenticatedUserId) : "1"
+              user_id: session.userId ? String(session.userId) : "1"
             }
           }
-        }));
+        });
       } else if (data.type === "get_config") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
@@ -741,11 +969,11 @@ wss.on("connection", (ws: WebSocket) => {
             components: ["api", "websocket", "mobile_app", "device_tracker", "sensor"],
             version: "2026.9.1"
           }
-        }));
+        });
       } else if (data.type === "get_services") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: {} }));
+        sendResponse({ id: data.id, type: "result", success: true, result: {} });
       } else if (data.type === "get_panels") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
@@ -757,58 +985,102 @@ wss.on("connection", (ws: WebSocket) => {
               config: { views: [] }
             }
           }
-        }));
+        });
       } else if (data.type === "frontend/get_translations") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
           result: { resources: {} }
-        }));
+        });
       } else if (data.type === "manifest/list") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
           result: []
-        }));
+        });
       } else if (data.type === "get_states") {
         db = loadDB();
-        ws.send(JSON.stringify({
+        const userStates = (db.entity_states || []).filter((e: any) => !session.userId || e.user_id === session.userId);
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
-          result: db.entity_states || []
-        }));
+          result: userStates
+        });
       } else if (data.type === "config/device_registry/list") {
         db = loadDB();
-        const devices = (db.devices || []).map((d: any) => ({
-          id: String(d.id),
-          name: d.device_name,
-          model: d.model,
-          manufacturer: d.manufacturer,
-          sw_version: d.os_version,
-          identifiers: [["mobile_app", d.device_id]],
-          connections: [],
-          area_id: null,
-          disabled_by: null,
-          entry_type: null
-        }));
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: devices }));
+        const devices = (db.devices || [])
+          .filter((d: any) => !session.userId || d.user_id === session.userId)
+          .map((d: any) => ({
+            id: String(d.id),
+            name: d.device_name,
+            model: d.model,
+            manufacturer: d.manufacturer,
+            sw_version: d.os_version,
+            identifiers: [["mobile_app", d.device_id]],
+            connections: [],
+            area_id: null,
+            disabled_by: null,
+            entry_type: null
+          }));
+        sendResponse({ id: data.id, type: "result", success: true, result: devices });
       } else if (data.type === "config/entity_registry/list") {
         db = loadDB();
-        const entities = (db.entity_states || []).map((e: any) => ({
-          entity_id: e.entity_id,
-          name: e.attributes?.friendly_name || null,
-          icon: e.attributes?.icon || null,
-          platform: "mobile_app",
-          config_entry_id: null,
-          device_id: null,
-          area_id: null,
-          disabled_by: null,
-          capabilities: {}
+        const entities = (db.entity_states || [])
+          .filter((e: any) => !session.userId || e.user_id === session.userId)
+          .map((e: any) => ({
+            entity_id: e.entity_id,
+            name: e.attributes?.friendly_name || null,
+            icon: e.attributes?.icon || null,
+            platform: "mobile_app",
+            config_entry_id: null,
+            device_id: e.device_id ? String(e.device_id) : null,
+            area_id: null,
+            disabled_by: null,
+            capabilities: {}
+          }));
+        sendResponse({ id: data.id, type: "result", success: true, result: entities });
+      } else if (data.type === "config/entity_registry/list_for_display") {
+        db = loadDB();
+        const entities = (db.entity_states || [])
+          .filter((e: any) => !session.userId || e.user_id === session.userId)
+          .map((e: any) => ({
+            entity_id: e.entity_id,
+            name: e.attributes?.friendly_name || null,
+            icon: e.attributes?.icon || null,
+            platform: "mobile_app",
+            device_id: e.device_id ? String(e.device_id) : null,
+            area_id: null,
+            disabled_by: null,
+            hidden_by: null,
+            entity_category: null,
+            translation_key: null
+          }));
+        sendResponse({
+          id: data.id,
+          type: "result",
+          success: true,
+          result: {
+            entity_categories: {},
+            entities
+          }
+        });
+      } else if (data.type === "config/floor_registry/list" || data.type === "config/label_registry/list" || data.type === "config/category_registry/list") {
+        sendResponse({ id: data.id, type: "result", success: true, result: [] });
+      } else if (data.type === "config/zone_registry/list") {
+        db = loadDB();
+        const zones = (db.places || []).map((p: any) => ({
+          id: `zone_${p.id}`,
+          name: p.name,
+          latitude: p.latitude,
+          longitude: p.longitude,
+          radius: p.radius || 100,
+          icon: "mdi:map-marker",
+          passive: false
         }));
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: entities }));
+        sendResponse({ id: data.id, type: "result", success: true, result: zones });
       } else if (data.type === "config/area_registry/list") {
         db = loadDB();
         const areas = (db.places || []).map((p: any) => ({
@@ -817,33 +1089,44 @@ wss.on("connection", (ws: WebSocket) => {
           picture: null,
           aliases: []
         }));
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: areas }));
+        sendResponse({ id: data.id, type: "result", success: true, result: areas });
       } else if (data.type === "frontend/get_user_data") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
           result: { show_advanced_options: false }
-        }));
+        });
       } else {
-        ws.send(JSON.stringify({
+        console.warn(`[WS DIAGNOSTIC] Unhandled command type received: '${data.type}' (id: ${data.id}, session: ${session.id})`);
+        sendResponse({
           id: data.id,
           type: "result",
           success: false,
-          error: { code: "not_supported", message: `Command '${data.type}' is not supported.` }
-        }));
+          error: { code: "unknown_command", message: `Command '${data.type}' is not supported.` }
+        });
       }
     } catch (e) {
       // Ignore invalid JSON
     }
   });
 
-  ws.on("error", () => {
-    connectedClients.delete(ws);
+  ws.on("error", (err) => {
+    const duration = ((Date.now() - session.connectedAt) / 1000).toFixed(2);
+    console.error(`[WS DIAGNOSTIC ERROR] Session ${session.id} error after ${duration}s: ${err.message}`);
+    clientSessions.delete(ws);
   });
 
-  ws.on("close", () => {
-    connectedClients.delete(ws);
+  ws.on("close", (code, reason) => {
+    const duration = ((Date.now() - session.connectedAt) / 1000).toFixed(2);
+    const reasonStr = reason ? reason.toString() : "No reason provided";
+    console.log(
+      `[WS DIAGNOSTIC CLOSE] Session ${session.id} closed [user_id=${session.userId}, duration=${duration}s, ` +
+      `close_code=${code}, reason='${reasonStr}', last_rx_type='${session.lastReceivedType}', last_rx_id=${session.lastReceivedId}, ` +
+      `last_tx_type='${session.lastSentType}', last_tx_id=${session.lastSentId}, ` +
+      `event_subs=[${Array.from(session.eventSubs.keys()).join(",")}], entity_subs=[${Array.from(session.entitySubs.keys()).join(",")}]`
+    );
+    clientSessions.delete(ws);
   });
 });
 
@@ -859,10 +1142,103 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 function broadcastStateUpdate(event: any) {
-  const payload = JSON.stringify({ type: "event", event });
-  connectedClients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
+  clientSessions.forEach((session) => {
+    if (session.ws.readyState !== WebSocket.OPEN) return;
+
+    // Enforce user isolation
+    const eventUserId = event.context?.user_id;
+    if (eventUserId != null && session.userId != null && String(eventUserId) !== String(session.userId)) {
+      return;
+    }
+
+    // 1. Send to subscribers of subscribe_events
+    session.eventSubs.forEach((eventType, subId) => {
+      if (eventType === "*" || eventType === event.event_type) {
+        session.ws.send(JSON.stringify({ id: subId, type: "event", event }));
+      }
+    });
+
+    // 2. Send to subscribers of subscribe_entities
+    if (event.event_type === "state_changed" && session.entitySubs.size > 0) {
+      const entityId = event.data?.entity_id;
+      if (!entityId) return;
+
+      const oldState = event.data?.old_state;
+      const newState = event.data?.new_state;
+
+      session.entitySubs.forEach((filter, subId) => {
+        if (!matchesEntityFilter(entityId, filter)) return;
+
+        let diffPayload: any = null;
+
+        // Case 1: Entity removed
+        if (!newState) {
+          diffPayload = { r: [entityId] };
+        }
+        // Case 2: Entity added
+        else if (!oldState) {
+          const nowTs = Date.now() / 1000;
+          const lc = typeof newState.last_changed === "string" ? new Date(newState.last_changed).getTime() / 1000 : nowTs;
+          const lu = typeof newState.last_updated === "string" ? new Date(newState.last_updated).getTime() / 1000 : lc;
+          const entry: any = {
+            s: String(newState.state != null ? newState.state : "unknown"),
+            a: newState.attributes || {},
+            c: event.context?.id || `ctx_${entityId}`,
+            lc: lc
+          };
+          if (lu !== lc) entry.lu = lu;
+          diffPayload = { a: { [entityId]: entry } };
+        }
+        // Case 3: State or Attribute changes
+        else {
+          const additions: Record<string, any> = {};
+          const oldS = String(oldState.state != null ? oldState.state : "");
+          const newS = String(newState.state != null ? newState.state : "");
+          if (oldS !== newS) {
+            additions.s = newS;
+          }
+
+          const nowTs = Date.now() / 1000;
+          const oldLc = typeof oldState.last_changed === "string" ? new Date(oldState.last_changed).getTime() / 1000 : nowTs;
+          const newLc = typeof newState.last_changed === "string" ? new Date(newState.last_changed).getTime() / 1000 : nowTs;
+          const oldLu = typeof oldState.last_updated === "string" ? new Date(oldState.last_updated).getTime() / 1000 : oldLc;
+          const newLu = typeof newState.last_updated === "string" ? new Date(newState.last_updated).getTime() / 1000 : newLc;
+
+          if (oldLc !== newLc) {
+            additions.lc = newLc;
+          } else if (oldLu !== newLu) {
+            additions.lu = newLu;
+          }
+
+          additions.c = event.context?.id || `ctx_${entityId}`;
+
+          const oldAttrs = oldState.attributes || {};
+          const newAttrs = newState.attributes || {};
+
+          const addedAttrs: Record<string, any> = {};
+          for (const k of Object.keys(newAttrs)) {
+            if (!(k in oldAttrs) || JSON.stringify(oldAttrs[k]) !== JSON.stringify(newAttrs[k])) {
+              addedAttrs[k] = newAttrs[k];
+            }
+          }
+          if (Object.keys(addedAttrs).length > 0) {
+            additions.a = addedAttrs;
+          }
+
+          const diffObj: any = { "+": additions };
+
+          const removedAttrKeys = Object.keys(oldAttrs).filter(k => !(k in newAttrs));
+          if (removedAttrKeys.length > 0) {
+            diffObj["-"] = { a: removedAttrKeys };
+          }
+
+          diffPayload = { c: { [entityId]: diffObj } };
+        }
+
+        if (diffPayload) {
+          session.ws.send(JSON.stringify({ id: subId, type: "event", event: diffPayload }));
+        }
+      });
     }
   });
 }
@@ -2096,7 +2472,8 @@ app.put("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) =>
 
 app.delete("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) => {
   db = loadDB();
-  const entityId = req.params.entity_id;
+  const rawEntityId = req.params.entity_id;
+  const entityId = (Array.isArray(rawEntityId) ? rawEntityId[0] : rawEntityId) as string;
   const userId = req.user!.id;
 
   const dtIndex = db.entity_states.findIndex(
@@ -2107,14 +2484,14 @@ app.delete("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res)
     return res.status(404).json({ detail: "Device not found" });
   }
 
-  // Remove the entity_state
-  db.entity_states.splice(dtIndex, 1);
+  const removedEntity = db.entity_states.splice(dtIndex, 1)[0];
 
-  // If there are associated devices in db.devices matching device tracker or webhook, clean up
-  if (db.devices && Array.isArray(db.devices)) {
+  // If this was a primary device_tracker entity, clean up associated device registration
+  if (entityId.startsWith("device_tracker.") && db.devices && Array.isArray(db.devices)) {
     db.devices = db.devices.filter((d) => {
       if (d.user_id !== userId) return true;
-      if (d.device_id && entityId.includes(d.device_id)) return false;
+      const dtSlug = (d.device_name || d.device_id || "").toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
+      if (entityId === `device_tracker.${dtSlug}`) return false;
       return true;
     });
   }
@@ -2129,6 +2506,19 @@ app.delete("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res)
   }
 
   saveDB(db);
+
+  broadcastStateUpdate({
+    event_type: "state_changed",
+    data: {
+      entity_id: entityId,
+      old_state: removedEntity,
+      new_state: null
+    },
+    context: {
+      id: `ctx_${Date.now()}`,
+      user_id: userId
+    }
+  });
 
   res.json({ success: true, message: "Device deleted successfully" });
 });
@@ -2597,13 +2987,13 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
       unit_system: {
         length: "km",
         mass: "g",
-        temperature: "\u00b0C",
+        temperature: "°C",
         volume: "L"
       },
-      location_name: "Home",
+      location_name: "Home Assistant",
       time_zone: "UTC",
-      components: ["mobile_app", "webhook", "zone", "device_tracker"],
-      version: "2024.1.0",
+      components: ["api", "websocket", "mobile_app", "webhook", "zone", "device_tracker", "sensor", "binary_sensor"],
+      version: "2026.9.1",
       theme_color: "#03a9f4",
       entities: {}
     });
@@ -2611,17 +3001,150 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
 
   // 3. register_sensor
   if (type === "register_sensor") {
+    db.sensor_registrations = db.sensor_registrations || [];
+    db.entity_states = db.entity_states || [];
+    const userId = matchingDevice ? matchingDevice.user_id : (db.users[0] ? db.users[0].id : 1);
+    const deviceId = matchingDevice ? matchingDevice.id : 1;
+    const deviceName = matchingDevice ? matchingDevice.device_name : "Device";
+
+    const uniqueId = data?.unique_id || "sensor_unknown";
+    const sensorName = data?.name || uniqueId;
+    const devSlug = deviceName.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") || `device_${deviceId}`;
+    const sensorSlug = sensorName.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") || uniqueId;
+    const domain = data?.type === "binary_sensor" ? "binary_sensor" : "sensor";
+    const baseEntityId = `${domain}.${devSlug}_${sensorSlug}`;
+
+    let reg = db.sensor_registrations.find((r: any) => r.device_id === deviceId && r.unique_id === uniqueId);
+    let entityId = reg ? reg.entity_id : "";
+
+    if (!entityId) {
+      let candidateEntityId = baseEntityId;
+      let counter = 1;
+      while (true) {
+        const existingEntity = db.entity_states.find((e: any) => e.entity_id === candidateEntityId);
+        if (!existingEntity || existingEntity.user_id === userId || existingEntity.device_id === deviceId) {
+          entityId = candidateEntityId;
+          break;
+        }
+        counter += 1;
+        candidateEntityId = `${baseEntityId}_${counter}`;
+      }
+    }
+
+    if (reg) {
+      reg.name = sensorName;
+      reg.entity_id = entityId;
+      reg.unit_of_measurement = data?.unit_of_measurement;
+      reg.device_class = data?.device_class;
+      reg.icon = data?.icon;
+      reg.disabled = data?.disabled ?? false;
+    } else {
+      reg = {
+        id: Date.now() + Math.random(),
+        device_id: deviceId,
+        user_id: userId,
+        unique_id: uniqueId,
+        entity_id: entityId,
+        name: sensorName,
+        unit_of_measurement: data?.unit_of_measurement,
+        icon: data?.icon,
+        device_class: data?.device_class,
+        disabled: data?.disabled ?? false
+      };
+      db.sensor_registrations.push(reg);
+    }
+
+    // Upsert entity state
+    const now = new Date().toISOString();
+    const existingIdx = db.entity_states.findIndex((e: any) => e.entity_id === entityId);
+    const oldEntityState = existingIdx !== -1 ? { ...db.entity_states[existingIdx], attributes: { ...(db.entity_states[existingIdx].attributes || {}) } } : null;
+    const updatedEntity: EntityStateData = {
+      entity_id: entityId,
+      user_id: userId,
+      device_id: deviceId,
+      domain: domain,
+      state: String(data?.state ?? "unknown"),
+      attributes: {
+        friendly_name: `${deviceName} ${sensorName}`,
+        device_class: data?.device_class,
+        unit_of_measurement: data?.unit_of_measurement,
+        icon: data?.icon,
+        ...(data?.attributes || {})
+      },
+      last_changed: oldEntityState?.state !== String(data?.state ?? "unknown") ? now : (oldEntityState?.last_changed || now),
+      last_updated: now
+    };
+
+    if (existingIdx !== -1) {
+      db.entity_states[existingIdx] = updatedEntity;
+    } else {
+      db.entity_states.push(updatedEntity);
+    }
+    saveDB(db);
+
+    broadcastStateUpdate({
+      event_type: "state_changed",
+      data: {
+        entity_id: entityId,
+        old_state: oldEntityState,
+        new_state: updatedEntity
+      },
+      context: {
+        id: `ctx_${entityId}`,
+        user_id: userId
+      }
+    });
+
     return res.status(201).json({ success: true });
   }
 
   // 4. update_sensor_states
   if (type === "update_sensor_states") {
+    db.sensor_registrations = db.sensor_registrations || [];
+    db.entity_states = db.entity_states || [];
+    const userId = matchingDevice ? matchingDevice.user_id : (db.users[0] ? db.users[0].id : 1);
+    const deviceId = matchingDevice ? matchingDevice.id : 1;
+    const deviceName = matchingDevice ? matchingDevice.device_name : "Device";
+
     const resp: Record<string, any> = {};
-    if (Array.isArray(data)) {
-      data.forEach((s: any) => {
-        if (s?.unique_id) resp[s.unique_id] = { success: true };
-      });
+    const updates = Array.isArray(data) ? data : (data ? [data] : []);
+
+    for (const item of updates) {
+      if (!item?.unique_id) continue;
+      const reg = db.sensor_registrations.find((r: any) => r.device_id === deviceId && r.unique_id === item.unique_id);
+      if (!reg) {
+        resp[item.unique_id] = { error: { code: "not_registered", message: "Sensor must be registered first" } };
+        continue;
+      }
+
+      const entityId = reg.entity_id;
+      const now = new Date().toISOString();
+      const existingIdx = db.entity_states.findIndex((e: any) => e.entity_id === entityId);
+      const updatedEntity: EntityStateData = {
+        entity_id: entityId,
+        user_id: userId,
+        device_id: deviceId,
+        domain: entityId.split(".")[0] || "sensor",
+        state: String(item.state ?? "unknown"),
+        attributes: {
+          friendly_name: `${deviceName} ${reg.name}`,
+          unit_of_measurement: reg.unit_of_measurement,
+          icon: reg.icon,
+          device_class: reg.device_class,
+          ...(existingIdx !== -1 ? db.entity_states[existingIdx].attributes : {}),
+          ...(item.attributes || {})
+        },
+        last_updated: now
+      };
+
+      if (existingIdx !== -1) {
+        db.entity_states[existingIdx] = updatedEntity;
+      } else {
+        db.entity_states.push(updatedEntity);
+      }
+      resp[item.unique_id] = { success: true };
     }
+    saveDB(db);
     return res.json(resp);
   }
 
@@ -2644,28 +3167,57 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
     const battery = data?.location?.battery ?? data?.battery ?? req.body.battery ?? 100;
     const accuracy = data?.location?.gps_accuracy ?? data?.gps_accuracy ?? data?.accuracy ?? req.body.gps_accuracy ?? 5;
     const userId = req.body.user_id || (matchingDevice ? matchingDevice.user_id : (db.users[0] ? db.users[0].id : 1));
-    const entityId = req.body.entity_id || data?.entity_id || (matchingDevice ? `device_tracker.${matchingDevice.device_id}` : "device_tracker.mobile_app");
+    const deviceId = matchingDevice ? matchingDevice.id : 1;
+    const devSlug = (matchingDevice ? matchingDevice.device_name : "device").toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") || "mobile_app";
+    const baseEntityId = `device_tracker.${devSlug}`;
+    
+    let entityId = req.body.entity_id || data?.entity_id;
+    if (!entityId) {
+      let candidateEntityId = baseEntityId;
+      let counter = 1;
+      while (true) {
+        const existingEntity = db.entity_states.find((e: any) => e.entity_id === candidateEntityId);
+        if (!existingEntity || existingEntity.user_id === userId || (matchingDevice && existingEntity.device_id === deviceId)) {
+          entityId = candidateEntityId;
+          break;
+        }
+        counter += 1;
+        candidateEntityId = `${baseEntityId}_${counter}`;
+      }
+    }
     const targetUser = db.users.find((u) => u.id === userId);
 
     if (lat != null && lon != null) {
       const now = new Date().toISOString();
       const existingIdx = db.entity_states.findIndex((e) => e.entity_id === entityId);
+      const existingEntity = existingIdx !== -1 ? db.entity_states[existingIdx] : null;
+      const oldState = existingEntity ? { ...existingEntity, attributes: { ...(existingEntity.attributes || {}) } } : null;
       
+      const existingAttrs = existingEntity?.attributes || {};
+      const newAttrs: Record<string, any> = {
+        ...existingAttrs,
+        friendly_name: req.body.device_name || (matchingDevice ? matchingDevice.device_name : (existingAttrs.friendly_name || "Companion Phone")),
+        battery_level: battery,
+        gps_accuracy: accuracy,
+        platform: existingAttrs.platform || "Android",
+        location_visibility: existingAttrs.location_visibility || "family",
+        map_icon: existingAttrs.map_icon || "Phone"
+      };
+      const speedVal = data?.speed ?? data?.location?.speed ?? req.body.speed;
+      if (speedVal != null) {
+        newAttrs.speed = Number(speedVal);
+      }
+
       const updatedState: EntityStateData = {
         entity_id: entityId,
         user_id: userId,
+        device_id: deviceId,
         domain: "device_tracker",
         state: "not_home",
-        attributes: {
-          friendly_name: req.body.device_name || (matchingDevice ? matchingDevice.device_name : (existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.friendly_name : "Companion Phone")),
-          battery_level: battery,
-          gps_accuracy: accuracy,
-          platform: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.platform || "Android" : "Android",
-          location_visibility: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.location_visibility || "family" : "family",
-          map_icon: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.map_icon || "Phone" : "Phone"
-        },
+        attributes: newAttrs,
         latitude: Number(lat),
         longitude: Number(lon),
+        last_changed: existingEntity?.state !== "not_home" ? now : (existingEntity?.last_changed || now),
         last_updated: now
       };
 
@@ -2715,7 +3267,12 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
         event_type: "state_changed",
         data: {
           entity_id: entityId,
+          old_state: oldState,
           new_state: updatedState
+        },
+        context: {
+          id: `ctx_${entityId}`,
+          user_id: userId
         }
       });
 
@@ -2734,12 +3291,8 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
     }
   }
 
-  // Registration or general HA response
-  res.json({
-    id: crypto.randomBytes(8).toString("hex"),
-    webhook_id: req.params.webhook_id || "default_webhook",
-    secret: crypto.randomBytes(16).toString("hex")
-  });
+  // Other Home Assistant webhook command types (render_template, fire_event, call_service, scan_tag, etc.)
+  return res.status(200).json({});
 });
 
 // Entity States and History Endpoints

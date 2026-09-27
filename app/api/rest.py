@@ -362,11 +362,18 @@ async def api_get_devices(
     for index, st in enumerate(entities):
         attrs = st.attributes if isinstance(st.attributes, dict) else {}
         is_def = bool(attrs.get("is_default", False if has_explicit_default else index == 0))
+        battery_val = attrs.get("battery")
+        if battery_val is None:
+            battery_val = attrs.get("battery_level")
+        if battery_val is None:
+            battery_val = 100
+
         devices_list.append({
             "entity_id": st.entity_id,
             "name": attrs.get("friendly_name") or st.entity_id,
             "platform": attrs.get("source_type") or "mobile_app",
-            "battery": attrs.get("battery") or attrs.get("battery_level") or 100,
+            "battery": battery_val,
+            "charging": attrs.get("charging"),
             "state": st.state,
             "last_updated": st.last_updated.isoformat() if hasattr(st.last_updated, "isoformat") else str(st.last_updated),
             "location_visibility": attrs.get("location_visibility", "family"),
@@ -428,6 +435,7 @@ async def api_update_device(
         "name": attrs.get("friendly_name") or st.entity_id,
         "platform": attrs.get("source_type") or "mobile_app",
         "battery": attrs.get("battery") or attrs.get("battery_level") or 100,
+        "charging": attrs.get("charging"),
         "state": st.state,
         "last_updated": st.last_updated.isoformat() if hasattr(st.last_updated, "isoformat") else str(st.last_updated),
         "location_visibility": attrs.get("location_visibility", "family"),

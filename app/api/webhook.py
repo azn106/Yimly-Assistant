@@ -78,10 +78,10 @@ async def handle_webhook(
                 "temperature": "\u00b0C",
                 "volume": "L"
             },
-            "location_name": "Home",
+            "location_name": "Home Assistant",
             "time_zone": "UTC",
-            "components": ["mobile_app", "webhook", "zone", "device_tracker"],
-            "version": "2024.1.0",
+            "components": ["api", "websocket", "mobile_app", "webhook", "zone", "device_tracker", "sensor", "binary_sensor"],
+            "version": "2026.9.1",
             "theme_color": "#03a9f4",
             "entities": {}
         }
@@ -120,7 +120,11 @@ async def handle_webhook(
     # 4. update_location command
     elif req_type == "update_location":
         if req_data is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing data field for update_location.")
+            # HA Core accepts empty update_location requests as a keepalive / ping
+            now = datetime.now(timezone.utc)
+            device.last_seen_at = now
+            await db.commit()
+            return JSONResponse(content={}, status_code=status.HTTP_200_OK)
         
         # Handle list/dict flexibility
         if isinstance(req_data, list):
@@ -131,45 +135,23 @@ async def handle_webhook(
         if not isinstance(req_data, dict):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="update_location data must be a JSON object.")
 
-        # Normalize HA gps coordinate format: "gps": [latitude, longitude]
-        if "gps" in req_data and isinstance(req_data["gps"], (list, tuple)) and len(req_data["gps"]) >= 2:
-            if "latitude" not in req_data or req_data["latitude"] is None:
-                try:
-                    req_data["latitude"] = float(req_data["gps"][0])
-                except (ValueError, TypeError):
-                    pass
-            if "longitude" not in req_data or req_data["longitude"] is None:
-                try:
-                    req_data["longitude"] = float(req_data["gps"][1])
-                except (ValueError, TypeError):
-                    pass
-
-        if "accuracy" in req_data and ("gps_accuracy" not in req_data or req_data["gps_accuracy"] is None):
-            req_data["gps_accuracy"] = req_data["accuracy"]
-
-        if "course" in req_data and ("bearing" not in req_data or req_data["bearing"] is None):
-            req_data["bearing"] = req_data["course"]
-
-        # Validate that coordinates exist if not zone-based
-        if req_data.get("latitude") is not None and req_data.get("longitude") is not None:
-            try:
-                loc_data = LocationUpdateData(**req_data)
+        try:
+            loc_data = LocationUpdateData(**req_data)
+            if loc_data.latitude is not None and loc_data.longitude is not None:
                 await TelemetryService.process_location_update(db, device, loc_data)
-                return JSONResponse(content={}, status_code=status.HTTP_200_OK)
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Failed to process location update webhook: {e}")
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Location payload validation error: {e}")
-        elif "location_name" in req_data:
-            now = datetime.now(timezone.utc)
-            device.last_seen_at = now
-            device.first_telemetry_received = True
-            device.device_offline_alert_triggered = False
-            await db.commit()
+            else:
+                # Update device last_seen_at even if coordinates not provided (e.g. zone ping)
+                now = datetime.now(timezone.utc)
+                device.last_seen_at = now
+                device.first_telemetry_received = True
+                device.device_offline_alert_triggered = False
+                await db.commit()
             return JSONResponse(content={}, status_code=status.HTTP_200_OK)
-        else:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Location payload missing coordinates.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to process location update webhook: {e}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Location payload validation error: {e}")
 
     # 5. register_sensor command
     elif req_type == "register_sensor":
@@ -194,7 +176,7 @@ async def handle_webhook(
     # 6. update_sensor_states command
     elif req_type == "update_sensor_states":
         if req_data is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing data field for update_sensor_states.")
+            return JSONResponse(content={}, status_code=status.HTTP_200_OK)
         
         try:
             if isinstance(req_data, dict):
@@ -216,8 +198,8 @@ async def handle_webhook(
             logger.error(f"Failed to process sensor updates: {e}")
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Sensor states update error: {e}")
 
-    # 7. Other commands (call_service, fire_event, scan_tag)
-    elif req_type in ("call_service", "fire_event", "scan_tag"):
+    # 7. Other commands (call_service, fire_event, scan_tag, render_template, stream_camera)
+    elif req_type in ("call_service", "fire_event", "scan_tag", "render_template", "stream_camera"):
         return JSONResponse(content={}, status_code=status.HTTP_200_OK)
 
     # 8. Unhandled commands

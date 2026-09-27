@@ -22,9 +22,14 @@ body,
   width: 100%;
   height: 100%;
   height: 100dvh;
+  min-height: -webkit-fill-available;
   margin: 0;
   padding: 0;
   overflow: hidden;
+  position: fixed;
+  inset: 0;
+  touch-action: manipulation;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* MapLibre Attribution: subtle, tiny, accessible, behind navigation */
