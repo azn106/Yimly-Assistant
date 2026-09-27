@@ -3151,7 +3151,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
             y: sheetY
           }}
         >
-          <div className="w-full h-full bg-white/85 backdrop-blur-2xl border-t border-x border-white/80 shadow-[0_-12px_40px_rgba(0,0,0,0.08)] rounded-t-[32px] overflow-hidden relative z-10 pt-2 pb-8">
+          <div className="w-full h-full bg-white/85 backdrop-blur-2xl border-t border-x border-white/80 shadow-[0_-12px_40px_rgba(0,0,0,0.08)] rounded-t-[32px] overflow-hidden relative z-10 pt-2 pb-[calc(2rem+env(safe-area-inset-bottom,0px))]">
             {/* Centered Drag Handle / Tap to expand-collapse */}
             <div
               onClick={() => setSheetState(sheetState === "expanded" ? "compact" : "expanded")}

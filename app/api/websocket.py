@@ -13,14 +13,10 @@ from app.services.websocket_service import session_manager
 router = APIRouter()
 
 async def session_keepalive(session: Any) -> None:
-    """Sends periodic keepalive pings to prevent proxy/NAT/Cloud Run 60s idle disconnects."""
+    """Keeps session alive. WS protocol ping/pong is handled at transport layer."""
     try:
         while True:
             await asyncio.sleep(25)
-            try:
-                await session.send_json({"type": "ping"})
-            except Exception:
-                break
     except asyncio.CancelledError:
         pass
 
@@ -232,7 +228,8 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
         # Define dynamic callback to send events belonging to this session's user
         async def event_callback(event_obj: Dict[str, Any]) -> None:
             # Enforce user boundary/isolation
-            if event_obj.get("context", {}).get("user_id") == user_id:
+            event_user_id = event_obj.get("context", {}).get("user_id")
+            if event_user_id is None or event_user_id == user_id or str(event_user_id) == str(user_id):
                 await session.send_json({
                     "id": cmd_id,  # Critical: Must match client's subscription request ID!
                     "type": "event",
@@ -413,7 +410,15 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
             "result": []
         })
 
-    elif cmd_type == "subscribe_trigger":
+    elif cmd_type in (
+        "subscribe_trigger",
+        "persistent_notification/subscribe",
+        "mobile_app/push_notification_channel",
+        "mobile_app/get_push_notifications",
+        "sensor/push",
+        "camera/stream",
+        "render_template"
+    ):
         await session.send_json({
             "id": cmd_id,
             "type": "result",
@@ -435,11 +440,11 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
         })
 
     else:
-        # Return elegant error for unrecognized commands to prevent connection crashes
+        # Return standard unknown_command error for unrecognized commands
         logger.warning(f"Unsupported command type received: {cmd_type}")
         await session.send_json({
             "id": cmd_id,
             "type": "result",
             "success": False,
-            "error": {"code": "not_supported", "message": f"Command '{cmd_type}' is not supported."}
+            "error": {"code": "unknown_command", "message": f"Command '{cmd_type}' is not supported."}
         })

@@ -956,7 +956,7 @@ export default function App() {
   };
 
   return (
-    <div className="w-screen h-screen overflow-hidden bg-slate-900 text-slate-900 font-sans relative select-none">
+    <div className="w-full h-full h-[100dvh] fixed inset-0 overflow-hidden bg-slate-900 text-slate-900 font-sans select-none">
       
       {/* AUTHENTICATED SYSTEM FLOW */}
       {status === "authenticated" ? (
@@ -1295,7 +1295,7 @@ export default function App() {
         </div>
       ) : (
         /* FIRST-RUN SETUP / LOGIN FLOW */
-        <div className="min-h-screen bg-slate-50 flex flex-col justify-between py-12 px-4 sm:px-6 lg:px-8">
+        <div className="w-full h-full min-h-[100dvh] overflow-y-auto bg-slate-50 flex flex-col justify-between py-12 px-4 sm:px-6 lg:px-8">
           <header className="flex flex-col items-center space-y-3 select-none" id="app-header">
             <div className="h-12 w-12 rounded-2xl bg-indigo-50/80 text-indigo-600 flex items-center justify-center shadow-sm border border-indigo-100/30">
               <Home className="h-6 w-6" />
