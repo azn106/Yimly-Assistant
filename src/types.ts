@@ -25,6 +25,7 @@ export interface MemberDeviceLocation {
   latitude: number;
   longitude: number;
   battery?: number | string | null;
+  charging?: boolean | null;
   accuracy?: number | null;
   last_updated: string;
   platform?: string;
@@ -39,6 +40,7 @@ export interface UserDevice {
   name: string;
   platform: string;
   battery: number | string;
+  charging?: boolean | null;
   state: string;
   last_updated: string;
   location_visibility: "family" | "me_only";
