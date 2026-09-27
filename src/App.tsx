@@ -23,13 +23,43 @@ import { SettingsTab } from "./components/SettingsTab";
 import { PreviewTestState, processPreviewTestMembers } from "./lib/previewTestMode";
 import { PreviewTestModeControls } from "./components/PreviewTestModeControls";
 import { getAvatarColor } from "./lib/avatarColor";
-import {
-  notifyExternalBus,
-  globalWsManager,
-  connectWebSocketManager,
-  disconnectWebSocketManager
-} from "./lib/websocketManager";
-export { notifyExternalBus };
+
+// Helper to dispatch messages to Android Companion App (V2 and V1) and iOS External Bus
+export const notifyExternalBus = (type: string, payload?: any, id?: number) => {
+  const msg: any = { type };
+  if (payload !== undefined) msg.payload = payload;
+  if (id !== undefined) msg.id = id;
+  const msgStr = JSON.stringify(msg);
+
+  try {
+    const extAppV2 = (window as any).externalAppV2;
+    if (extAppV2 && typeof extAppV2.postMessage === "function") {
+      extAppV2.postMessage(msgStr);
+    }
+  } catch (err) {
+    console.warn("[ExternalBus] externalAppV2 postMessage error:", err);
+  }
+
+  try {
+    const extApp = (window as any).externalApp;
+    if (extApp && typeof extApp.externalBus === "function") {
+      extApp.externalBus(msgStr);
+    } else if (extApp && typeof extApp.postMessage === "function") {
+      extApp.postMessage(msgStr);
+    }
+  } catch (err) {
+    console.warn("[ExternalBus] externalApp notify error:", err);
+  }
+
+  try {
+    const webkit = (window as any).webkit;
+    if (webkit?.messageHandlers?.externalBus?.postMessage) {
+      webkit.messageHandlers.externalBus.postMessage(msgStr);
+    }
+  } catch (err) {
+    console.warn("[ExternalBus] webkit externalBus postMessage error:", err);
+  }
+};
 
 // Helper to notify native app when revoking external auth
 export const revokeExternalAuth = () => {
@@ -352,35 +382,119 @@ export default function App() {
     };
   }, []);
 
-  // WebSocket stable function references
+  // WebSocket instance and stable function references
+  const wsRef = useRef<WebSocket | null>(null);
   const fetchCircleMembersRef = useRef<((circleId: number, silent?: boolean) => Promise<void>) | null>(null);
   const fetchAlertsRef = useRef(fetchAlerts);
   fetchAlertsRef.current = fetchAlerts;
 
-  // Live WebSocket Connection to Home Assistant backend via global singleton manager
+  // Live WebSocket Connection to Home Assistant backend
   useEffect(() => {
-    if (status !== "authenticated") {
-      disconnectWebSocketManager();
-      return;
-    }
+    if (status !== "authenticated") return;
     const token = localStorage.getItem("access_token");
     if (!token) return;
 
-    const onStateChanged = () => {
-      if (selectedCircleRef.current) {
-        fetchCircleMembersRef.current?.(selectedCircleRef.current.id, true);
-        fetchAlertsRef.current(selectedCircleRef.current.id, true);
+    let isSubscribed = true;
+    let reconnectTimeout: any = null;
+
+    const connectWebSocket = () => {
+      if (!isSubscribed) return;
+
+      // Prevent duplicate connection attempts if already active or connecting
+      if (wsRef.current && (wsRef.current.readyState === WebSocket.CONNECTING || wsRef.current.readyState === WebSocket.OPEN)) {
+        return;
+      }
+
+      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${wsProtocol}//${window.location.host}/api/websocket`;
+
+      try {
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          console.log("[HA WebSocket] Connected to /api/websocket");
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+
+            if (data.type === "ping") {
+              const pongPayload: any = { type: "pong" };
+              if (data.id !== undefined) pongPayload.id = data.id;
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(pongPayload));
+              }
+            } else if (data.type === "auth_required") {
+              // Complete handshake challenge with access token
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "auth", access_token: token }));
+              }
+            } else if (data.type === "auth_ok") {
+              console.log("[HA WebSocket] Auth successful (auth_ok). Notifying Companion App.");
+              // Notify Android / iOS Companion App via External Bus that frontend is connected
+              notifyExternalBus("connection-status", { event: "connected" });
+
+              // Subscribe to state change events for real-time live map updates
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ id: 1, type: "subscribe_events", event_type: "state_changed" }));
+                ws.send(JSON.stringify({ id: 2, type: "get_states" }));
+                ws.send(JSON.stringify({ id: 3, type: "get_config" }));
+              }
+            } else if (data.type === "auth_invalid") {
+              console.warn("[HA WebSocket] Auth invalid.");
+              notifyExternalBus("connection-status", { event: "auth-invalid" });
+            } else if (data.type === "event" && data.event?.event_type === "state_changed") {
+              // Real-time entity state update received: silently refresh circle members & alerts
+              if (selectedCircleRef.current) {
+                fetchCircleMembersRef.current?.(selectedCircleRef.current.id, true);
+                fetchAlertsRef.current(selectedCircleRef.current.id, true);
+              }
+            }
+          } catch (err) {
+            console.warn("[HA WebSocket] Error parsing message:", err);
+          }
+        };
+
+        ws.onclose = (evt) => {
+          console.log("[HA WebSocket] Connection closed.", evt.code, evt.reason);
+          if (wsRef.current === ws) {
+            wsRef.current = null;
+          }
+          // ONLY notify external bus and attempt reconnect if session is active (not during intentional component unmount)
+          if (isSubscribed) {
+            notifyExternalBus("connection-status", { event: "disconnected" });
+            reconnectTimeout = setTimeout(connectWebSocket, 4000);
+          }
+        };
+
+        ws.onerror = (err) => {
+          console.warn("[HA WebSocket] Connection error:", err);
+          try {
+            ws.close();
+          } catch {}
+        };
+      } catch (e) {
+        console.error("[HA WebSocket] Failed to create WebSocket:", e);
+        if (isSubscribed) {
+          reconnectTimeout = setTimeout(connectWebSocket, 5000);
+        }
       }
     };
 
-    globalWsManager.onStateChangedCallbacks.add(onStateChanged);
-    connectWebSocketManager(token);
+    connectWebSocket();
 
     return () => {
-      globalWsManager.onStateChangedCallbacks.delete(onStateChanged);
-      // NOTE: We do NOT disconnect the global WebSocket on component unmount / effect cleanup
-      // as long as status remains 'authenticated'. Disconnect is invoked when status changes
-      // away from 'authenticated' or on explicit user logout.
+      isSubscribed = false;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (wsRef.current) {
+        const socketToClose = wsRef.current;
+        wsRef.current = null;
+        try {
+          socketToClose.close();
+        } catch {}
+      }
     };
   }, [status]);
 
@@ -492,7 +606,6 @@ export default function App() {
         } else {
           localStorage.removeItem("access_token");
           localStorage.removeItem("user_info");
-          disconnectWebSocketManager();
         }
       } catch (err) {
         console.error("Error validating session:", err);
@@ -809,8 +922,6 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    disconnectWebSocketManager();
-
     const isCompanionSession =
       sessionStorage.getItem("external_auth") === "1" ||
       localStorage.getItem("external_auth") === "1" ||
