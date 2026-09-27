@@ -143,6 +143,46 @@ async def on_startup() -> None:
                 logger.info("Database migration: Added first_telemetry_received column to devices table.")
             except Exception:
                 pass
+
+            # Dynamically migrate sensor_registrations table if legacy schema without 'id' column exists
+            try:
+                table_info = await conn.execute(text("PRAGMA table_info(sensor_registrations);"))
+                columns = table_info.fetchall()
+                has_id_pk = any(col[1] == "id" and col[5] == 1 for col in columns)
+                if columns and not has_id_pk:
+                    logger.info("Migrating sensor_registrations table to device-scoped unique_id schema...")
+                    await conn.execute(text("""
+                        CREATE TABLE sensor_registrations_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                            unique_id VARCHAR(255) NOT NULL,
+                            entity_id VARCHAR(255) NOT NULL,
+                            name VARCHAR(255) NOT NULL,
+                            unit_of_measurement VARCHAR(50),
+                            icon VARCHAR(100),
+                            device_class VARCHAR(100),
+                            state_class VARCHAR(100),
+                            entity_category VARCHAR(100),
+                            disabled BOOLEAN NOT NULL DEFAULT 0,
+                            created_at DATETIME NOT NULL,
+                            updated_at DATETIME NOT NULL,
+                            CONSTRAINT uq_device_sensor_unique_id UNIQUE (device_id, unique_id)
+                        );
+                    """))
+                    await conn.execute(text("""
+                        INSERT INTO sensor_registrations_new (device_id, user_id, unique_id, entity_id, name, unit_of_measurement, icon, device_class, state_class, entity_category, disabled, created_at, updated_at)
+                        SELECT device_id, user_id, unique_id, entity_id, name, unit_of_measurement, icon, device_class, state_class, entity_category, disabled, created_at, updated_at
+                        FROM sensor_registrations;
+                    """))
+                    await conn.execute(text("DROP TABLE sensor_registrations;"))
+                    await conn.execute(text("ALTER TABLE sensor_registrations_new RENAME TO sensor_registrations;"))
+                    await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_device_sensor_unique_id ON sensor_registrations (device_id, unique_id);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_sensor_device_unique ON sensor_registrations (device_id, unique_id);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_sensor_user_device ON sensor_registrations (user_id, device_id);"))
+                    logger.info("Successfully migrated sensor_registrations schema without data loss.")
+            except Exception as e_mig:
+                logger.warning(f"Note on sensor_registrations migration check: {e_mig}")
                 
         logger.info("Database schemas created/verified successfully.")
 

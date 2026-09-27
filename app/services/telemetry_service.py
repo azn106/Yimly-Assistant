@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.db.models import Device, LocationHistory, SensorRegistration, User
+from app.db.models import Device, EntityState, LocationHistory, SensorRegistration, User
 from app.schemas.telemetry import LocationUpdateData, SensorRegistrationData, SensorStateUpdate
 from app.services.state_service import StateService
 
@@ -115,7 +115,20 @@ class TelemetryService:
         entity_name = slugify(device.device_name)
         if not entity_name:
             entity_name = f"device_{device.id}"
-        entity_id = f"device_tracker.{entity_name}"
+        base_entity_id = f"device_tracker.{entity_name}"
+
+        # Resolve candidate device_tracker entity_id disambiguating across different devices
+        candidate_entity_id = base_entity_id
+        counter = 1
+        while True:
+            stmt_dt = select(EntityState).where(EntityState.entity_id == candidate_entity_id)
+            res_dt = await db.execute(stmt_dt)
+            existing_dt = res_dt.scalar_one_or_none()
+            if not existing_dt or (existing_dt.device_id is not None and existing_dt.device_id == device.id):
+                entity_id = candidate_entity_id
+                break
+            counter += 1
+            candidate_entity_id = f"{base_entity_id}_{counter}"
 
         # Determine if "home" or "not_home" (near the configured latitude/longitude from config)
         # We can read home lat/lon from a configuration. Let's default to server 0,0 or check if it's within 100 meters
@@ -321,25 +334,47 @@ class TelemetryService:
         device: Device,
         data: SensorRegistrationData
     ) -> Dict[str, Any]:
-        # Generate stable entity ID for this sensor
-        dev_slug = slugify(device.device_name) or f"device_{device.id}"
-        sensor_slug = slugify(data.name) or slugify(data.unique_id)
-        domain = data.type if data.type in ["sensor", "binary_sensor"] else "sensor"
-        default_entity_id = f"{domain}.{dev_slug}_{sensor_slug}"
-
+        # 1. Lookup existing sensor registration SCOPED TO THIS DEVICE
         stmt = select(SensorRegistration).where(
+            SensorRegistration.device_id == device.id,
             SensorRegistration.unique_id == data.unique_id
         )
         result = await db.execute(stmt)
         reg = result.scalar_one_or_none()
+
+        if reg and reg.entity_id:
+            # Reusing existing stable entity_id for this sensor on this device
+            entity_id = reg.entity_id
+        else:
+            # Generate deterministic entity ID
+            dev_slug = slugify(device.device_name) or f"device_{device.id}"
+            sensor_slug = slugify(data.name) or slugify(data.unique_id)
+            domain = data.type if data.type in ["sensor", "binary_sensor"] else "sensor"
+            base_entity_id = f"{domain}.{dev_slug}_{sensor_slug}"
+
+            # Check if this entity_id is already in use by a DIFFERENT device
+            candidate_entity_id = base_entity_id
+            counter = 1
+            while True:
+                stmt_entity = select(EntityState).where(EntityState.entity_id == candidate_entity_id)
+                res_entity = await db.execute(stmt_entity)
+                existing_entity = res_entity.scalar_one_or_none()
+
+                # If no existing entity, or existing entity already belongs to THIS device, candidate is good!
+                if not existing_entity or (existing_entity.device_id is not None and existing_entity.device_id == device.id):
+                    entity_id = candidate_entity_id
+                    break
+
+                # Disambiguate for the new device
+                counter += 1
+                candidate_entity_id = f"{base_entity_id}_{counter}"
 
         if reg:
             # Update metadata and preserve correct ownership/device/user association
             reg.device_id = device.id
             reg.user_id = device.user_id
             reg.name = data.name
-            if not reg.entity_id:
-                reg.entity_id = default_entity_id
+            reg.entity_id = entity_id
             reg.unit_of_measurement = data.unit_of_measurement
             reg.icon = data.icon
             reg.device_class = data.device_class
@@ -347,9 +382,7 @@ class TelemetryService:
             reg.entity_category = data.entity_category
             if data.disabled is not None:
                 reg.disabled = data.disabled
-            entity_id = reg.entity_id
         else:
-            entity_id = default_entity_id
             reg = SensorRegistration(
                 unique_id=data.unique_id,
                 device_id=device.id,
@@ -370,8 +403,9 @@ class TelemetryService:
         except Exception:
             await db.rollback()
             db.expunge_all()
-            # If a race condition occurred, re-query by unique_id and update
+            # If a race condition occurred, re-query scoped to this device and update
             stmt = select(SensorRegistration).where(
+                SensorRegistration.device_id == device.id,
                 SensorRegistration.unique_id == data.unique_id
             )
             result = await db.execute(stmt)
@@ -381,7 +415,7 @@ class TelemetryService:
                 reg.user_id = device.user_id
                 reg.name = data.name
                 if not reg.entity_id:
-                    reg.entity_id = default_entity_id
+                    reg.entity_id = entity_id
                 reg.unit_of_measurement = data.unit_of_measurement
                 reg.icon = data.icon
                 reg.device_class = data.device_class
@@ -426,8 +460,9 @@ class TelemetryService:
     ) -> Dict[str, Any]:
         results = {}
         for item in updates:
-            # Check registration for this unique_id
+            # Check registration SCOPED TO THIS DEVICE
             stmt = select(SensorRegistration).where(
+                SensorRegistration.device_id == device.id,
                 SensorRegistration.unique_id == item.unique_id
             )
             result = await db.execute(stmt)

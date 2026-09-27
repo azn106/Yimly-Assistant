@@ -109,6 +109,7 @@ export interface CircleMemberData {
 export interface EntityStateData {
   entity_id: string;
   user_id: number;
+  device_id?: number;
   domain: string;
   state: string;
   attributes: Record<string, any>;
@@ -187,6 +188,7 @@ export interface YimlyPreviewDatabase {
   device_battery_states: DeviceBatteryStateData[];
   device_offline_states: DeviceOfflineStateData[];
   devices: any[];
+  sensor_registrations?: any[];
 }
 
 
@@ -491,7 +493,8 @@ function loadDB(): YimlyPreviewDatabase {
       geofence_states: [],
       device_battery_states: [],
       device_offline_states: [],
-      devices: []
+      devices: [],
+      sensor_registrations: []
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(initialDB, null, 2));
     return initialDB;
@@ -514,7 +517,8 @@ function loadDB(): YimlyPreviewDatabase {
       geofence_states: parsed.geofence_states || [],
       device_battery_states: parsed.device_battery_states || [],
       device_offline_states: parsed.device_offline_states || [],
-      devices: parsed.devices || []
+      devices: parsed.devices || [],
+      sensor_registrations: parsed.sensor_registrations || []
     };
 
     // If loaded history was empty or upgraded, persist it
@@ -2611,17 +2615,135 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
 
   // 3. register_sensor
   if (type === "register_sensor") {
+    db.sensor_registrations = db.sensor_registrations || [];
+    db.entity_states = db.entity_states || [];
+    const userId = matchingDevice ? matchingDevice.user_id : (db.users[0] ? db.users[0].id : 1);
+    const deviceId = matchingDevice ? matchingDevice.id : 1;
+    const deviceName = matchingDevice ? matchingDevice.device_name : "Device";
+
+    const uniqueId = data?.unique_id || "sensor_unknown";
+    const sensorName = data?.name || uniqueId;
+    const devSlug = deviceName.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") || `device_${deviceId}`;
+    const sensorSlug = sensorName.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") || uniqueId;
+    const domain = data?.type === "binary_sensor" ? "binary_sensor" : "sensor";
+    const baseEntityId = `${domain}.${devSlug}_${sensorSlug}`;
+
+    let reg = db.sensor_registrations.find((r: any) => r.device_id === deviceId && r.unique_id === uniqueId);
+    let entityId = reg ? reg.entity_id : "";
+
+    if (!entityId) {
+      let candidateEntityId = baseEntityId;
+      let counter = 1;
+      while (true) {
+        const existingEntity = db.entity_states.find((e: any) => e.entity_id === candidateEntityId);
+        if (!existingEntity || existingEntity.device_id === deviceId) {
+          entityId = candidateEntityId;
+          break;
+        }
+        counter += 1;
+        candidateEntityId = `${baseEntityId}_${counter}`;
+      }
+    }
+
+    if (reg) {
+      reg.name = sensorName;
+      reg.entity_id = entityId;
+      reg.unit_of_measurement = data?.unit_of_measurement;
+      reg.device_class = data?.device_class;
+      reg.icon = data?.icon;
+      reg.disabled = data?.disabled ?? false;
+    } else {
+      reg = {
+        id: Date.now() + Math.random(),
+        device_id: deviceId,
+        user_id: userId,
+        unique_id: uniqueId,
+        entity_id: entityId,
+        name: sensorName,
+        unit_of_measurement: data?.unit_of_measurement,
+        icon: data?.icon,
+        device_class: data?.device_class,
+        disabled: data?.disabled ?? false
+      };
+      db.sensor_registrations.push(reg);
+    }
+
+    // Upsert entity state
+    const now = new Date().toISOString();
+    const existingIdx = db.entity_states.findIndex((e: any) => e.entity_id === entityId);
+    const updatedEntity: EntityStateData = {
+      entity_id: entityId,
+      user_id: userId,
+      device_id: deviceId,
+      domain: domain,
+      state: String(data?.state ?? "unknown"),
+      attributes: {
+        friendly_name: `${deviceName} ${sensorName}`,
+        device_class: data?.device_class,
+        unit_of_measurement: data?.unit_of_measurement,
+        icon: data?.icon,
+        ...(data?.attributes || {})
+      },
+      last_updated: now
+    };
+
+    if (existingIdx !== -1) {
+      db.entity_states[existingIdx] = updatedEntity;
+    } else {
+      db.entity_states.push(updatedEntity);
+    }
+    saveDB(db);
+
     return res.status(201).json({ success: true });
   }
 
   // 4. update_sensor_states
   if (type === "update_sensor_states") {
+    db.sensor_registrations = db.sensor_registrations || [];
+    db.entity_states = db.entity_states || [];
+    const userId = matchingDevice ? matchingDevice.user_id : (db.users[0] ? db.users[0].id : 1);
+    const deviceId = matchingDevice ? matchingDevice.id : 1;
+    const deviceName = matchingDevice ? matchingDevice.device_name : "Device";
+
     const resp: Record<string, any> = {};
-    if (Array.isArray(data)) {
-      data.forEach((s: any) => {
-        if (s?.unique_id) resp[s.unique_id] = { success: true };
-      });
+    const updates = Array.isArray(data) ? data : (data ? [data] : []);
+
+    for (const item of updates) {
+      if (!item?.unique_id) continue;
+      const reg = db.sensor_registrations.find((r: any) => r.device_id === deviceId && r.unique_id === item.unique_id);
+      if (!reg) {
+        resp[item.unique_id] = { error: { code: "not_registered", message: "Sensor must be registered first" } };
+        continue;
+      }
+
+      const entityId = reg.entity_id;
+      const now = new Date().toISOString();
+      const existingIdx = db.entity_states.findIndex((e: any) => e.entity_id === entityId);
+      const updatedEntity: EntityStateData = {
+        entity_id: entityId,
+        user_id: userId,
+        device_id: deviceId,
+        domain: entityId.split(".")[0] || "sensor",
+        state: String(item.state ?? "unknown"),
+        attributes: {
+          friendly_name: `${deviceName} ${reg.name}`,
+          unit_of_measurement: reg.unit_of_measurement,
+          icon: reg.icon,
+          device_class: reg.device_class,
+          ...(existingIdx !== -1 ? db.entity_states[existingIdx].attributes : {}),
+          ...(item.attributes || {})
+        },
+        last_updated: now
+      };
+
+      if (existingIdx !== -1) {
+        db.entity_states[existingIdx] = updatedEntity;
+      } else {
+        db.entity_states.push(updatedEntity);
+      }
+      resp[item.unique_id] = { success: true };
     }
+    saveDB(db);
     return res.json(resp);
   }
 
@@ -2644,7 +2766,24 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
     const battery = data?.location?.battery ?? data?.battery ?? req.body.battery ?? 100;
     const accuracy = data?.location?.gps_accuracy ?? data?.gps_accuracy ?? data?.accuracy ?? req.body.gps_accuracy ?? 5;
     const userId = req.body.user_id || (matchingDevice ? matchingDevice.user_id : (db.users[0] ? db.users[0].id : 1));
-    const entityId = req.body.entity_id || data?.entity_id || (matchingDevice ? `device_tracker.${matchingDevice.device_id}` : "device_tracker.mobile_app");
+    const deviceId = matchingDevice ? matchingDevice.id : 1;
+    const devSlug = (matchingDevice ? matchingDevice.device_name : "device").toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") || "mobile_app";
+    const baseEntityId = `device_tracker.${devSlug}`;
+    
+    let entityId = req.body.entity_id || data?.entity_id;
+    if (!entityId) {
+      let candidateEntityId = baseEntityId;
+      let counter = 1;
+      while (true) {
+        const existingEntity = db.entity_states.find((e: any) => e.entity_id === candidateEntityId);
+        if (!existingEntity || (matchingDevice && existingEntity.device_id === deviceId)) {
+          entityId = candidateEntityId;
+          break;
+        }
+        counter += 1;
+        candidateEntityId = `${baseEntityId}_${counter}`;
+      }
+    }
     const targetUser = db.users.find((u) => u.id === userId);
 
     if (lat != null && lon != null) {

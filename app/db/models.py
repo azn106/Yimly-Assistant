@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from sqlalchemy import (
-    Column, Integer, String, Boolean, Float, DateTime, ForeignKey, Text, JSON, Index, Table
+    Column, Integer, String, Boolean, Float, DateTime, ForeignKey, Text, JSON, Index, Table, UniqueConstraint
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.database import Base
@@ -125,9 +125,10 @@ class EntityState(Base):
 class SensorRegistration(Base):
     __tablename__ = "sensor_registrations"
 
-    unique_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     device_id: Mapped[int] = mapped_column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), nullable=False)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    unique_id: Mapped[str] = mapped_column(String(255), nullable=False)
     entity_id: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     unit_of_measurement: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
@@ -140,6 +141,12 @@ class SensorRegistration(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
     device: Mapped["Device"] = relationship("Device", back_populates="sensors")
+
+    __table_args__ = (
+        UniqueConstraint("device_id", "unique_id", name="uq_device_sensor_unique_id"),
+        Index("idx_sensor_device_unique", "device_id", "unique_id"),
+        Index("idx_sensor_user_device", "user_id", "device_id"),
+    )
 
 
 class LocationHistory(Base):
