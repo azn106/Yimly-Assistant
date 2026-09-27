@@ -24,7 +24,10 @@ async def session_keepalive(session: Any) -> None:
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session = session_manager.connect(websocket)
-    logger.info("New WebSocket client connected. Initiating Home Assistant handshake.")
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    logger.info(f"WebSocket client connected [conn_id={session.id}, ip={client_ip}]. Initiating Home Assistant handshake.")
+
+    explicit_close_called = False
 
     # 1. Send auth_required challenge
     await session.send_json({
@@ -40,6 +43,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "type": "auth_invalid",
                 "message": "Auth message required"
             })
+            explicit_close_called = True
             await websocket.close()
             session_manager.disconnect(session)
             return
@@ -51,6 +55,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "type": "auth_invalid",
                 "message": "Invalid access token"
             })
+            explicit_close_called = True
             await websocket.close()
             session_manager.disconnect(session)
             return
@@ -62,6 +67,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "type": "auth_invalid",
                 "message": "Malformed token sub claim"
             })
+            explicit_close_called = True
             await websocket.close()
             session_manager.disconnect(session)
             return
@@ -77,6 +83,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "type": "auth_invalid",
                 "message": "User not found or deactivated"
             })
+            explicit_close_called = True
             await websocket.close()
             session_manager.disconnect(session)
             return
@@ -87,11 +94,12 @@ async def websocket_endpoint(websocket: WebSocket):
             "type": "auth_ok",
             "ha_version": "2026.9.1"
         })
-        logger.info(f"WebSocket client authenticated successfully for user {user.username} (ID: {user.id})")
+        logger.info(f"WebSocket client authenticated successfully [conn_id={session.id}, user_id={user.id}, username={user.username}]")
 
     except Exception as e:
-        logger.error(f"WebSocket auth handshake failed: {e}")
+        logger.error(f"WebSocket auth handshake failed [conn_id={session.id}]: {e}")
         try:
+            explicit_close_called = True
             await websocket.close()
         except Exception:
             pass
@@ -129,7 +137,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 await handle_command(session, cmd_id, cmd_type, msg)
             except Exception as cmd_err:
-                logger.error(f"Error handling WebSocket command '{cmd_type}' (id: {cmd_id}): {cmd_err}")
+                logger.error(f"Error handling WebSocket command '{cmd_type}' (id: {cmd_id}, conn_id={session.id}): {cmd_err}")
                 await session.send_json({
                     "id": cmd_id,
                     "type": "result",
@@ -138,12 +146,29 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
 
     except WebSocketDisconnect as wsd:
-        logger.info(f"WebSocket disconnected for user {session.user_id} (code: {getattr(wsd, 'code', '1000')})")
+        duration = round(time.time() - session.connected_at, 2)
+        code = getattr(wsd, "code", 1000)
+        reason = getattr(wsd, "reason", "") or "No reason provided"
+        logger.info(
+            f"WebSocket receive loop terminated: CLIENT -> CLOSE "
+            f"[conn_id={session.id}, user_id={session.user_id}, duration={duration}s, "
+            f"close_code={code}, reason='{reason}', server_close_called={explicit_close_called}]"
+        )
     except Exception as e:
-        logger.error(f"WebSocket processing loop error for user {session.user_id}: {type(e).__name__}: {e}")
+        duration = round(time.time() - session.connected_at, 2)
+        logger.error(
+            f"WebSocket receive loop terminated with exception "
+            f"[conn_id={session.id}, user_id={session.user_id}, duration={duration}s, "
+            f"error_type={type(e).__name__}, error={e}, server_close_called={explicit_close_called}]"
+        )
     finally:
         keepalive_task.cancel()
         session_manager.disconnect(session)
+        duration = round(time.time() - session.connected_at, 2)
+        logger.info(
+            f"WebSocket endpoint returned and session destroyed "
+            f"[conn_id={session.id}, user_id={session.user_id}, duration={duration}s]"
+        )
 
 async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str, Any]) -> None:
     user_id = session.user_id
@@ -248,7 +273,81 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
         })
         logger.info(f"User {user_id} subscribed to WebSocket event type: {event_type} (sub_id: {cmd_id})")
 
-    elif cmd_type == "unsubscribe_events":
+    elif cmd_type == "subscribe_entities":
+        entity_ids = msg.get("entity_ids")
+        filter_set = set(entity_ids) if isinstance(entity_ids, list) and entity_ids else None
+
+        async with async_session_maker() as db:
+            entities = await StateService.get_all_states(db, user_id)
+
+        now_ts = time.time()
+        initial_entities = {}
+        for e in entities:
+            if filter_set and e.entity_id not in filter_set:
+                continue
+            lc = e.last_changed.timestamp() if hasattr(e.last_changed, "timestamp") else now_ts
+            lu = e.last_updated.timestamp() if hasattr(e.last_updated, "timestamp") else now_ts
+            initial_entities[e.entity_id] = {
+                "s": str(e.state),
+                "a": e.attributes or {},
+                "c": f"ctx_{e.entity_id}",
+                "lc": lc,
+                "lu": lu
+            }
+
+        # 1. Acknowledge subscription success
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": None
+        })
+
+        # 2. Emit initial entities dump under "a" key
+        await session.send_json({
+            "id": cmd_id,
+            "type": "event",
+            "event": {
+                "a": initial_entities
+            }
+        })
+
+        # 3. Stream state_changed updates as diffs under "c"
+        async def entity_diff_callback(event_obj: Dict[str, Any]) -> None:
+            event_user_id = event_obj.get("context", {}).get("user_id")
+            if event_user_id is not None and event_user_id != user_id and str(event_user_id) != str(user_id):
+                return
+
+            data = event_obj.get("data", {})
+            entity_id = data.get("entity_id")
+            if not entity_id or (filter_set and entity_id not in filter_set):
+                return
+
+            new_state_obj = data.get("new_state", {})
+            now_t = time.time()
+            await session.send_json({
+                "id": cmd_id,
+                "type": "event",
+                "event": {
+                    "c": {
+                        entity_id: {
+                            "+": {
+                                "s": str(new_state_obj.get("state", "")),
+                                "a": new_state_obj.get("attributes", {}),
+                                "lu": now_t,
+                                "lc": now_t,
+                                "c": event_obj.get("context", {}).get("id") or f"ctx_{cmd_id}"
+                            }
+                        }
+                    }
+                }
+            })
+
+        unsubscribe_func = event_bus.subscribe("state_changed", entity_diff_callback)
+        session.subscriptions[cmd_id] = unsubscribe_func
+        logger.info(f"User {user_id} subscribed to WebSocket entities stream [conn_id={session.id}, sub_id={cmd_id}, initial_count={len(initial_entities)}]")
+
+    elif cmd_type in ("unsubscribe_events", "unsubscribe_entities"):
         sub_id = msg.get("subscription")
         if isinstance(sub_id, int) and sub_id in session.subscriptions:
             unsubscribe_func = session.subscriptions.pop(sub_id)
@@ -262,7 +361,7 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
                 "success": True,
                 "result": None
             })
-            logger.info(f"User {user_id} unsubscribed from event ID: {sub_id}")
+            logger.info(f"User {user_id} unsubscribed from subscription ID: {sub_id} [conn_id={session.id}]")
         else:
             await session.send_json({
                 "id": cmd_id,

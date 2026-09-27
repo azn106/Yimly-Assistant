@@ -653,22 +653,35 @@ const server = http.createServer(app);
 
 // WebSocket Setup for Real-time Core updates
 const wss = new WebSocketServer({ noServer: true });
-const connectedClients = new Set<WebSocket>();
+
+interface ClientSession {
+  ws: WebSocket;
+  userId: number | null;
+  eventSubs: Map<number, string>;
+  entitySubs: Set<number>;
+}
+const clientSessions = new Map<WebSocket, ClientSession>();
 
 // Keepalive heartbeat every 25 seconds to keep proxies and clients alive
 setInterval(() => {
-  connectedClients.forEach((ws) => {
-    if (ws.readyState === WebSocket.OPEN) {
+  clientSessions.forEach((session) => {
+    if (session.ws.readyState === WebSocket.OPEN) {
       try {
-        ws.ping();
+        session.ws.ping();
       } catch {}
     }
   });
 }, 25000);
 
 wss.on("connection", (ws: WebSocket) => {
-  connectedClients.add(ws);
-  let authenticatedUserId: number | null = null;
+  const session: ClientSession = {
+    ws,
+    userId: null,
+    eventSubs: new Map(),
+    entitySubs: new Set()
+  };
+  clientSessions.set(ws, session);
+
   ws.send(JSON.stringify({ type: "auth_required", ha_version: "2026.9.1" }));
 
   ws.on("message", (message: string) => {
@@ -683,16 +696,16 @@ wss.on("connection", (ws: WebSocket) => {
           try {
             const decoded: any = jwt.verify(token, JWT_SECRET);
             if (decoded && decoded.sub) {
-              authenticatedUserId = Number(decoded.sub);
+              session.userId = Number(decoded.sub);
             }
           } catch {}
         }
         ws.send(JSON.stringify({ type: "auth_ok", ha_version: "2026.9.1" }));
       } else if (data.type === "auth/current_user") {
         db = loadDB();
-        const u = authenticatedUserId ? db.users.find((user: any) => user.id === authenticatedUserId) : (db.users[0] || null);
-        const userName = u ? (u.display_name || u.username) : (authenticatedUserId ? `User ${authenticatedUserId}` : "User");
-        const userIdStr = u ? String(u.id) : (authenticatedUserId ? String(authenticatedUserId) : "1");
+        const u = session.userId ? db.users.find((user: any) => user.id === session.userId) : (db.users[0] || null);
+        const userName = u ? (u.display_name || u.username) : (session.userId ? `User ${session.userId}` : "User");
+        const userIdStr = u ? String(u.id) : (session.userId ? String(session.userId) : "1");
         ws.send(JSON.stringify({
           id: data.id,
           type: "result",
@@ -711,8 +724,30 @@ wss.on("connection", (ws: WebSocket) => {
       } else if (data.type === "supported_features") {
         ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
       } else if (data.type === "subscribe_events") {
+        session.eventSubs.set(data.id, data.event_type || "state_changed");
         ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
-      } else if (data.type === "unsubscribe_events") {
+      } else if (data.type === "subscribe_entities") {
+        session.entitySubs.add(data.id);
+        db = loadDB();
+        const initialEntities: Record<string, any> = {};
+        const nowTs = Date.now() / 1000;
+        const userEntities = (db.entity_states || []).filter((e: any) => !session.userId || e.user_id === session.userId);
+        userEntities.forEach((e: any) => {
+          initialEntities[e.entity_id] = {
+            s: String(e.state || ""),
+            a: e.attributes || {},
+            c: `ctx_${e.entity_id}`,
+            lc: nowTs,
+            lu: nowTs
+          };
+        });
+        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+        ws.send(JSON.stringify({ id: data.id, type: "event", event: { a: initialEntities } }));
+      } else if (data.type === "unsubscribe_events" || data.type === "unsubscribe_entities") {
+        if (data.subscription != null) {
+          session.eventSubs.delete(data.subscription);
+          session.entitySubs.delete(data.subscription);
+        }
         ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
       } else if (data.type === "subscribe_trigger") {
         ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
@@ -843,11 +878,11 @@ wss.on("connection", (ws: WebSocket) => {
   });
 
   ws.on("error", () => {
-    connectedClients.delete(ws);
+    clientSessions.delete(ws);
   });
 
   ws.on("close", () => {
-    connectedClients.delete(ws);
+    clientSessions.delete(ws);
   });
 });
 
@@ -863,10 +898,39 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 function broadcastStateUpdate(event: any) {
-  const payload = JSON.stringify({ type: "event", event });
-  connectedClients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
+  clientSessions.forEach((session) => {
+    if (session.ws.readyState !== WebSocket.OPEN) return;
+
+    // Send to subscribers of subscribe_events
+    session.eventSubs.forEach((eventType, subId) => {
+      if (eventType === "*" || eventType === event.event_type) {
+        session.ws.send(JSON.stringify({ id: subId, type: "event", event }));
+      }
+    });
+
+    // Send to subscribers of subscribe_entities
+    if (event.event_type === "state_changed" && session.entitySubs.size > 0) {
+      const entityId = event.data?.entity_id;
+      const newState = event.data?.new_state;
+      if (entityId && newState) {
+        const nowTs = Date.now() / 1000;
+        const diffPayload = {
+          c: {
+            [entityId]: {
+              "+": {
+                s: String(newState.state || ""),
+                a: newState.attributes || {},
+                lu: nowTs,
+                lc: nowTs,
+                c: `ctx_${Date.now()}`
+              }
+            }
+          }
+        };
+        session.entitySubs.forEach((subId) => {
+          session.ws.send(JSON.stringify({ id: subId, type: "event", event: diffPayload }));
+        });
+      }
     }
   });
 }
