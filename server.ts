@@ -2601,13 +2601,13 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
       unit_system: {
         length: "km",
         mass: "g",
-        temperature: "\u00b0C",
+        temperature: "°C",
         volume: "L"
       },
-      location_name: "Home",
+      location_name: "Home Assistant",
       time_zone: "UTC",
-      components: ["mobile_app", "webhook", "zone", "device_tracker"],
-      version: "2024.1.0",
+      components: ["api", "websocket", "mobile_app", "webhook", "zone", "device_tracker", "sensor", "binary_sensor"],
+      version: "2026.9.1",
       theme_color: "#03a9f4",
       entities: {}
     });
@@ -2873,12 +2873,8 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
     }
   }
 
-  // Registration or general HA response
-  res.json({
-    id: crypto.randomBytes(8).toString("hex"),
-    webhook_id: req.params.webhook_id || "default_webhook",
-    secret: crypto.randomBytes(16).toString("hex")
-  });
+  // Other Home Assistant webhook command types (render_template, fire_event, call_service, scan_tag, etc.)
+  return res.status(200).json({});
 });
 
 // Entity States and History Endpoints
