@@ -1,6 +1,4 @@
 import asyncio
-import time
-import uuid
 from typing import Any, Callable, Dict, Optional, Set
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
@@ -9,8 +7,6 @@ from app.core.logging import logger
 class WebSocketSession:
     def __init__(self, websocket: WebSocket) -> None:
         self.websocket = websocket
-        self.id: str = uuid.uuid4().hex[:8]
-        self.connected_at: float = time.time()
         self.user_id: Optional[int] = None
         # Maps client-supplied subscription ID (int) -> unsubscribe callback function
         self.subscriptions: Dict[int, Callable[[], None]] = {}
