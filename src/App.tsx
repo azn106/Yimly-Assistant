@@ -27,7 +27,7 @@ import { getAvatarColor } from "./lib/avatarColor";
 // Re-export external bus helpers for backward compatibility
 export { notifyExternalBus, revokeExternalAuth, requestExternalAuthToken } from "./lib/externalBus";
 import { notifyExternalBus, revokeExternalAuth, requestExternalAuthToken } from "./lib/externalBus";
-import { haWebSocketManager } from "./lib/haWebSocket";
+import { haWebSocketManager, logWsDiag } from "./lib/haWebSocket";
 
 export default function App() {
   const [status, setStatus] = useState<"checking" | "setup" | "login" | "authenticated" | "register">("checking");
@@ -171,6 +171,7 @@ export default function App() {
     (window as any).externalBus = (msgStr: string | any) => {
       try {
         const msg = typeof msgStr === "string" ? JSON.parse(msgStr) : msgStr;
+        logWsDiag("EXTERNAL_BUS_INCOMING_MSG", { msgType: msg?.type });
         console.log("[ExternalBus] Incoming message from native app:", msg);
         if (msg?.type === "config/get") {
           notifyExternalBus("config/get", {
@@ -192,6 +193,8 @@ export default function App() {
     const token = localStorage.getItem("access_token");
     if (!token) return;
 
+    logWsDiag("APP_WEBSOCKET_EFFECT_ATTACHED", { status, hasToken: Boolean(token) });
+
     const unsubscribe = haWebSocketManager.subscribe({
       id: "app-root",
       onStateChanged: () => {
@@ -206,6 +209,7 @@ export default function App() {
     haWebSocketManager.connect(token);
 
     return () => {
+      logWsDiag("APP_WEBSOCKET_EFFECT_CLEANUP", { status });
       unsubscribe();
     };
   }, [status, fetchAlerts]);
@@ -264,6 +268,7 @@ export default function App() {
       localStorage.getItem("external_auth") === "1";
 
     const isExternalAuth = isExternalAuthParam || hasNativeBridge || storedExternalAuth;
+    logWsDiag("CHECK_SESSION_START", { isExternalAuth, hasStoredToken: Boolean(localStorage.getItem("access_token")) });
 
     if (isExternalAuth) {
       sessionStorage.setItem("external_auth", "1");
@@ -300,6 +305,7 @@ export default function App() {
           const fetchedUser = await res.json();
           localStorage.setItem("user_info", JSON.stringify(fetchedUser));
           setUser(fetchedUser);
+          logWsDiag("CHECK_SESSION_AUTH_SUCCESS", { userId: fetchedUser.id });
           setStatus("authenticated");
           await fetchCircles(token);
           return;
@@ -621,8 +627,15 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    logWsDiag("LOGOUT_INITIATED", {
+      isCompanionSession:
+        sessionStorage.getItem("external_auth") === "1" ||
+        localStorage.getItem("external_auth") === "1" ||
+        Boolean((window as any).externalAppV2) ||
+        Boolean((window as any).externalApp)
+    });
     // 0. Disconnect WebSocket session and prevent any reconnect
-    haWebSocketManager.disconnect(true);
+    haWebSocketManager.disconnect(true, "user_logout");
 
     const isCompanionSession =
       sessionStorage.getItem("external_auth") === "1" ||

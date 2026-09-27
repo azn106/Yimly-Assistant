@@ -1,7 +1,14 @@
 // Helpers to dispatch messages to Android Companion App (V2 and V1) and iOS External Bus
+import { logWsDiag } from "./haWebSocket";
 
 export const notifyExternalBus = (type: string, payload?: any, id?: number) => {
   if (typeof window === "undefined") return;
+
+  logWsDiag("EXTERNAL_BUS_NOTIFY_DISPATCH", {
+    type,
+    hasPayload: payload !== undefined,
+    id: id !== undefined ? id : undefined
+  });
 
   const msg: any = { type };
   if (payload !== undefined) msg.payload = payload;
@@ -42,8 +49,11 @@ export const notifyExternalBus = (type: string, payload?: any, id?: number) => {
 export const revokeExternalAuth = () => {
   if (typeof window === "undefined") return;
 
+  logWsDiag("EXTERNAL_AUTH_REVOKE_REQUEST");
+
   try {
     (window as any).externalAuthRevokeToken = (success: boolean) => {
+      logWsDiag("EXTERNAL_AUTH_REVOKE_CALLBACK", { success });
       console.log("[ExternalAuth] Token revoked on native app:", success);
     };
 
@@ -74,6 +84,8 @@ export const revokeExternalAuth = () => {
 export const requestExternalAuthToken = (): Promise<string | null> => {
   if (typeof window === "undefined") return Promise.resolve(null);
 
+  logWsDiag("EXTERNAL_AUTH_TOKEN_REQUEST_START");
+
   return new Promise<string | null>((resolve) => {
     let resolved = false;
     let pollTimer: any = null;
@@ -86,6 +98,7 @@ export const requestExternalAuthToken = (): Promise<string | null> => {
       if (!resolved) {
         resolved = true;
         cleanup();
+        logWsDiag("EXTERNAL_AUTH_TOKEN_TIMEOUT");
         console.warn("[ExternalAuth] Timeout waiting for native externalApp response.");
         resolve(null);
       }
@@ -97,6 +110,14 @@ export const requestExternalAuthToken = (): Promise<string | null> => {
       resolved = true;
       clearTimeout(timeout);
       cleanup();
+
+      logWsDiag("EXTERNAL_AUTH_TOKEN_RESPONSE", {
+        success,
+        hasAccessToken: Boolean(data?.access_token),
+        tokenLength: data?.access_token?.length || 0,
+        expiresIn: data?.expires_in
+      });
+
       if (success && data?.access_token) {
         console.log("[ExternalAuth] Token received from Companion App externalApp bridge.");
         resolve(data.access_token);

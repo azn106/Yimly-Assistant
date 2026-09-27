@@ -38,7 +38,7 @@ class MockBrowserWebSocket {
     this.readyState = MockBrowserWebSocket.CLOSING;
     setTimeout(() => {
       this.readyState = MockBrowserWebSocket.CLOSED;
-      if (this.onclose) this.onclose();
+      if (this.onclose) (this.onclose as any)({ code: 1000, reason: "Normal Closure", wasClean: true });
     }, 0);
   }
 
@@ -56,7 +56,7 @@ class MockBrowserWebSocket {
 
   simulateDrop() {
     this.readyState = MockBrowserWebSocket.CLOSED;
-    if (this.onclose) this.onclose();
+    if (this.onclose) (this.onclose as any)({ code: 1006, reason: "Abnormal Disconnect", wasClean: false });
   }
 }
 
