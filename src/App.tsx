@@ -400,6 +400,11 @@ export default function App() {
     const connectWebSocket = () => {
       if (!isSubscribed) return;
 
+      // Prevent duplicate connection attempts if already active or connecting
+      if (wsRef.current && (wsRef.current.readyState === WebSocket.CONNECTING || wsRef.current.readyState === WebSocket.OPEN)) {
+        return;
+      }
+
       const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = `${wsProtocol}//${window.location.host}/api/websocket`;
 
@@ -418,19 +423,25 @@ export default function App() {
             if (data.type === "ping") {
               const pongPayload: any = { type: "pong" };
               if (data.id !== undefined) pongPayload.id = data.id;
-              ws.send(JSON.stringify(pongPayload));
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(pongPayload));
+              }
             } else if (data.type === "auth_required") {
               // Complete handshake challenge with access token
-              ws.send(JSON.stringify({ type: "auth", access_token: token }));
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "auth", access_token: token }));
+              }
             } else if (data.type === "auth_ok") {
               console.log("[HA WebSocket] Auth successful (auth_ok). Notifying Companion App.");
               // Notify Android / iOS Companion App via External Bus that frontend is connected
               notifyExternalBus("connection-status", { event: "connected" });
 
               // Subscribe to state change events for real-time live map updates
-              ws.send(JSON.stringify({ id: 1, type: "subscribe_events", event_type: "state_changed" }));
-              ws.send(JSON.stringify({ id: 2, type: "get_states" }));
-              ws.send(JSON.stringify({ id: 3, type: "get_config" }));
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ id: 1, type: "subscribe_events", event_type: "state_changed" }));
+                ws.send(JSON.stringify({ id: 2, type: "get_states" }));
+                ws.send(JSON.stringify({ id: 3, type: "get_config" }));
+              }
             } else if (data.type === "auth_invalid") {
               console.warn("[HA WebSocket] Auth invalid.");
               notifyExternalBus("connection-status", { event: "auth-invalid" });
@@ -448,11 +459,12 @@ export default function App() {
 
         ws.onclose = (evt) => {
           console.log("[HA WebSocket] Connection closed.", evt.code, evt.reason);
-          notifyExternalBus("connection-status", { event: "disconnected" });
           if (wsRef.current === ws) {
             wsRef.current = null;
           }
+          // ONLY notify external bus and attempt reconnect if session is active (not during intentional component unmount)
           if (isSubscribed) {
+            notifyExternalBus("connection-status", { event: "disconnected" });
             reconnectTimeout = setTimeout(connectWebSocket, 4000);
           }
         };
@@ -692,6 +704,7 @@ export default function App() {
       if (!silent) setCirclesLoading(false);
     }
   };
+  fetchCircleMembersRef.current = fetchCircleMembers;
 
   // CREATE CIRCLE
   const handleCreateCircle = async (name: string) => {
