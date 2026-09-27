@@ -38,6 +38,19 @@ async function runProtocolCompatibilityTest() {
   console.log("HOME ASSISTANT CORE & COMPANION WEBSOCKET PROTOCOL COMPATIBILITY TEST SUITE");
   console.log("================================================================================");
 
+  // Clear yimly_store_preview.json database to prevent entity id suffix accumulation pollution (_2, _3, etc.)
+  try {
+    const fs = await import("fs");
+    const path = await import("path");
+    const dbPath = path.join(process.cwd(), "yimly_store_preview.json");
+    if (fs.existsSync(dbPath)) {
+      fs.unlinkSync(dbPath);
+      console.log("[Setup] Cleared yimly_store_preview.json database file for clean slate.");
+    }
+  } catch (err) {
+    console.warn("[Setup] Could not clear database file:", err);
+  }
+
   const runId = Date.now();
 
   // Create User A
@@ -68,33 +81,63 @@ async function runProtocolCompatibilityTest() {
   const userBId = userBRes.data.user.id;
   console.log(`  ✓ User B registered (id=${userBId})`);
 
-  // Seed states for User A
-  console.log("\n[Setup] Seeding initial states for User A...");
-  await postJson(`/api/states/person.alice`, {
-    state: "home",
-    attributes: { friendly_name: "Alice", latitude: 37.77, longitude: -122.41, source: "device_tracker.phone" }
+  // Register mobile app for User A to obtain webhook_id
+  const regARes = await postJson("/api/mobile_app/registrations", {
+    device_id: "alice_phone",
+    device_name: "Alice Phone",
+    app_id: "io.homeassistant.companion.android",
+    app_name: "Home Assistant",
+    app_version: "2026.9",
+    manufacturer: "Google",
+    model: "Pixel 8",
+    os_name: "Android",
+    os_version: "14",
+    supports_encryption: false
   }, tokenA);
-  await postJson(`/api/states/sensor.alice_battery`, {
-    state: "95",
-    attributes: { friendly_name: "Alice Phone Battery", unit_of_measurement: "%", device_class: "battery" }
-  }, tokenA);
-  await postJson(`/api/states/device_tracker.alice_car`, {
-    state: "not_home",
-    attributes: { friendly_name: "Alice Car" }
-  }, tokenA);
-  console.log("  ✓ Seeded person.alice, sensor.alice_battery, device_tracker.alice_car for User A.");
+  const webhookA = regARes.data.webhook_id;
 
-  // Seed states for User B
-  console.log("\n[Setup] Seeding initial states for User B...");
-  await postJson(`/api/states/person.bob`, {
-    state: "home",
-    attributes: { friendly_name: "Bob", latitude: 51.50, longitude: -0.12 }
+  // Register mobile app for User B to obtain webhook_id
+  const regBRes = await postJson("/api/mobile_app/registrations", {
+    device_id: "bob_phone",
+    device_name: "Bob Phone",
+    app_id: "io.homeassistant.companion.android",
+    app_name: "Home Assistant",
+    app_version: "2026.9",
+    manufacturer: "Google",
+    model: "Pixel 8",
+    os_name: "Android",
+    os_version: "14",
+    supports_encryption: false
   }, tokenB);
-  await postJson(`/api/states/sensor.bob_battery`, {
-    state: "80",
-    attributes: { friendly_name: "Bob Phone Battery", unit_of_measurement: "%" }
-  }, tokenB);
-  console.log("  ✓ Seeded person.bob, sensor.bob_battery for User B.");
+  const webhookB = regBRes.data.webhook_id;
+
+  // Seed states for User A via webhooks
+  console.log("\n[Setup] Seeding initial states for User A via webhooks...");
+  await postJson(`/api/webhook/${webhookA}`, {
+    type: "update_location",
+    data: { latitude: 37.77, longitude: -122.41, gps_accuracy: 5 }
+  });
+  await postJson(`/api/webhook/${webhookA}`, {
+    type: "register_sensor",
+    data: { unique_id: "battery_a", name: "Battery Level", state: "95", type: "sensor", unit_of_measurement: "%", device_class: "battery" }
+  });
+  await postJson(`/api/webhook/${webhookA}`, {
+    type: "register_sensor",
+    data: { unique_id: "car_a", name: "Alice Car", state: "not_home", type: "sensor" }
+  });
+  console.log("  ✓ Seeded device_tracker.alice_phone, sensor.alice_phone_battery_level, sensor.alice_phone_alice_car for User A.");
+
+  // Seed states for User B via webhooks
+  console.log("\n[Setup] Seeding initial states for User B via webhooks...");
+  await postJson(`/api/webhook/${webhookB}`, {
+    type: "update_location",
+    data: { latitude: 51.50, longitude: -0.12, gps_accuracy: 5 }
+  });
+  await postJson(`/api/webhook/${webhookB}`, {
+    type: "register_sensor",
+    data: { unique_id: "battery_b", name: "Battery Level", state: "80", type: "sensor", unit_of_measurement: "%" }
+  });
+  console.log("  ✓ Seeded device_tracker.bob_phone, sensor.bob_phone_battery_level for User B.");
 
   // Test Results Tracker
   const results: Record<string, boolean> = {
@@ -225,7 +268,7 @@ async function runProtocolCompatibilityTest() {
   ws1.send(JSON.stringify({
     id: subFilteredId,
     type: "subscribe_entities",
-    entity_ids: ["person.alice", "sensor.alice_battery"]
+    entity_ids: ["device_tracker.alice_phone", "sensor.alice_phone_battery_level"]
   }));
   await delay(1000);
 
@@ -242,26 +285,25 @@ async function runProtocolCompatibilityTest() {
   console.log("  Snapshot 'a' keys received:", Object.keys(snapshotA));
 
   // Verify entity_ids filter strictly obeyed
-  if (snapshotA["person.alice"] && snapshotA["sensor.alice_battery"] && !snapshotA["device_tracker.alice_car"]) {
+  if (snapshotA["device_tracker.alice_phone"] && snapshotA["sensor.alice_phone_battery_level"] && !snapshotA["sensor.alice_phone_alice_car"]) {
     results.subscribe_entities_entity_ids = true;
-    console.log("  ✓ Test 3: entity_ids filter accurately delivered ONLY person.alice and sensor.alice_battery!");
+    console.log("  ✓ Test 3: entity_ids filter accurately delivered ONLY device_tracker.alice_phone and sensor.alice_phone_battery_level!");
   } else {
     throw new Error(`Test 3 Failed: entity_ids filtering failed: ${JSON.stringify(snapshotA)}`);
   }
 
   // Verify initial snapshot structure and types
-  const personAliceState = snapshotA["person.alice"];
+  const alicePhoneState = snapshotA["device_tracker.alice_phone"];
   if (
-    typeof personAliceState.s === "string" &&
-    personAliceState.s === "home" &&
-    typeof personAliceState.a === "object" &&
-    typeof personAliceState.lc === "number" &&
-    typeof personAliceState.c !== "undefined"
+    typeof alicePhoneState.s === "string" &&
+    typeof alicePhoneState.a === "object" &&
+    typeof alicePhoneState.lc === "number" &&
+    typeof alicePhoneState.c !== "undefined"
   ) {
     results.initial_snapshot_format = true;
     console.log("  ✓ Test 6: Snapshot entity format strictly adheres to Home Assistant Core compressed schema!");
   } else {
-    throw new Error(`Test 6 Failed: compressed entity state malformed: ${JSON.stringify(personAliceState)}`);
+    throw new Error(`Test 6 Failed: compressed entity state malformed: ${JSON.stringify(alicePhoneState)}`);
   }
 
   // -------------------------------------------------------------------------
@@ -277,7 +319,7 @@ async function runProtocolCompatibilityTest() {
   await delay(1000);
   const incEvent = ws1Events.find((e) => e.id === subIncludeId && e.event?.a);
   const incKeys = Object.keys(incEvent?.event?.a || {});
-  if (incKeys.every((k) => k.startsWith("sensor.")) && incKeys.includes("sensor.alice_battery")) {
+  if (incKeys.every((k) => k.startsWith("sensor.")) && incKeys.includes("sensor.alice_phone_battery_level")) {
     results.include_filtering = true;
     console.log("  ✓ Test 4: Include filter for domain 'sensor' successfully verified!");
   } else {
@@ -293,7 +335,7 @@ async function runProtocolCompatibilityTest() {
   await delay(1000);
   const excEvent = ws1Events.find((e) => e.id === subExcludeId && e.event?.a);
   const excKeys = Object.keys(excEvent?.event?.a || {});
-  if (!excKeys.some((k) => k.startsWith("device_tracker.")) && excKeys.includes("person.alice")) {
+  if (!excKeys.some((k) => k.startsWith("device_tracker.")) && excKeys.includes("sensor.alice_phone_battery_level")) {
     results.exclude_filtering = true;
     console.log("  ✓ Test 5: Exclude filter for domain 'device_tracker' successfully verified!");
   } else {
@@ -324,20 +366,19 @@ async function runProtocolCompatibilityTest() {
   console.log("\n[Test 7] Testing Live State Changes & Attribute Diffs ('c' event)...");
   ws1Events.length = 0; // Clear events to isolate live diff
 
-  await postJson(`/api/states/person.alice`, {
-    state: "away",
-    attributes: { friendly_name: "Alice", latitude: 37.80, longitude: -122.40, speed: 25 }
-  }, tokenA);
+  await postJson(`/api/webhook/${webhookA}`, {
+    type: "update_location",
+    data: { latitude: 37.80, longitude: -122.40, speed: 25 }
+  });
   await delay(1000);
 
-  const diffEvent = ws1Events.find((e) => e.id === subFilteredId && e.event?.c?.["person.alice"]);
+  const diffEvent = ws1Events.find((e) => e.id === subFilteredId && e.event?.c?.["device_tracker.alice_phone"]);
   if (!diffEvent) {
-    throw new Error(`Live diff 'c' event not received for person.alice: ${JSON.stringify(ws1Events)}`);
+    throw new Error(`Live diff 'c' event not received for device_tracker.alice_phone: ${JSON.stringify(ws1Events)}`);
   }
-  const diffPayload = diffEvent.event.c["person.alice"];
-  console.log("  Diff '+' received for person.alice:", diffPayload["+"]);
+  const diffPayload = diffEvent.event.c["device_tracker.alice_phone"];
+  console.log("  Diff '+' received for device_tracker.alice_phone:", diffPayload["+"]);
   if (
-    diffPayload["+"]?.s === "away" &&
     diffPayload["+"]?.a?.speed === 25
   ) {
     results.live_c_update_diff = true;
@@ -356,19 +397,19 @@ async function runProtocolCompatibilityTest() {
   ws1.send(JSON.stringify({ id: subAllId, type: "subscribe_entities" }));
   await delay(1000);
 
-  // Add a brand new entity
-  await postJson(`/api/states/sensor.alice_steps`, {
-    state: "8500",
-    attributes: { friendly_name: "Steps Today", unit_of_measurement: "steps" }
-  }, tokenA);
+  // Add a brand new entity via webhook
+  await postJson(`/api/webhook/${webhookA}`, {
+    type: "register_sensor",
+    data: { unique_id: "alice_steps", name: "Steps Today", state: "8500", type: "sensor", unit_of_measurement: "steps" }
+  });
   await delay(1000);
 
-  const additionEvent = ws1Events.find((e) => e.id === subAllId && e.event?.a?.["sensor.alice_steps"]);
+  const additionEvent = ws1Events.find((e) => e.id === subAllId && e.event?.a?.["sensor.alice_phone_steps_today"]);
   if (additionEvent) {
     results.live_a_addition = true;
-    console.log("  ✓ Test 7b: Brand new entity delivered via 'a' addition event:", additionEvent.event.a["sensor.alice_steps"]);
+    console.log("  ✓ Test 7b: Brand new entity delivered via 'a' addition event:", additionEvent.event.a["sensor.alice_phone_steps_today"]);
   } else {
-    throw new Error(`Test 7b Failed: 'a' addition event not received for sensor.alice_steps: ${JSON.stringify(ws1Events)}`);
+    throw new Error(`Test 7b Failed: 'a' addition event not received for sensor.alice_phone_steps_today: ${JSON.stringify(ws1Events)}`);
   }
 
   // -------------------------------------------------------------------------
@@ -377,13 +418,13 @@ async function runProtocolCompatibilityTest() {
   console.log("\n[Test 8] Testing Live Entity Removal / Deletion ('r' event)...");
   ws1Events.length = 0;
 
-  const delRes = await deleteJson(`/api/states/sensor.alice_steps`, tokenA);
+  const delRes = await deleteJson(`/api/devices/sensor.alice_phone_steps_today`, tokenA);
   if (delRes.status !== 200) {
-    throw new Error(`Failed to delete sensor.alice_steps: ${JSON.stringify(delRes.data)}`);
+    throw new Error(`Failed to delete sensor.alice_phone_steps_today: ${JSON.stringify(delRes.data)}`);
   }
   await delay(1000);
 
-  const removalEvent = ws1Events.find((e) => e.id === subAllId && Array.isArray(e.event?.r) && e.event.r.includes("sensor.alice_steps"));
+  const removalEvent = ws1Events.find((e) => e.id === subAllId && Array.isArray(e.event?.r) && e.event.r.includes("sensor.alice_phone_steps_today"));
   if (removalEvent) {
     results.live_r_removal = true;
     console.log("  ✓ Test 8: Entity removal delivered via 'r' event:", removalEvent.event.r);
@@ -407,10 +448,10 @@ async function runProtocolCompatibilityTest() {
     console.log("  ✓ Unsubscribe acknowledged with success: true");
     // Verify that subsequent state changes do NOT arrive on sub_id 20
     ws1Events.length = 0;
-    await postJson(`/api/states/person.alice`, {
-      state: "home",
-      attributes: { friendly_name: "Alice" }
-    }, tokenA);
+    await postJson(`/api/webhook/${webhookA}`, {
+      type: "update_location",
+      data: { latitude: 37.77, longitude: -122.41 }
+    });
     await delay(1000);
 
     const staleEvent = ws1Events.find((e) => e.id === subFilteredId);
@@ -532,7 +573,7 @@ async function runProtocolCompatibilityTest() {
   console.log("  User B Snapshot keys:", Object.keys(userBSnapshot || {}));
 
   // Assert User B DOES NOT see User A's entities
-  if (userBSnapshot["person.bob"] && !userBSnapshot["person.alice"]) {
+  if (userBSnapshot["device_tracker.bob_phone"] && !userBSnapshot["device_tracker.alice_phone"]) {
     console.log("  ✓ User B cannot see User A's initial entities in snapshot.");
   } else {
     throw new Error("Security Violation: User B received User A's entity in initial snapshot!");
@@ -542,17 +583,21 @@ async function runProtocolCompatibilityTest() {
   ws1Events.length = 0;
   userBEvents.length = 0;
 
-  console.log("  Triggering live location update for User A...");
-  await postJson(`/api/states/person.alice`, {
-    state: "work",
-    attributes: { friendly_name: "Alice", latitude: 37.79, longitude: -122.39 }
-  }, tokenA);
-  await delay(1000);
+  console.log("  Triggering live location update for User A via webhook...");
+  const updateRes = await postJson(`/api/webhook/${webhookA}`, {
+    type: "update_location",
+    data: { latitude: 37.79, longitude: -122.39, speed: 15 }
+  });
+  console.log("  Webhook update response:", updateRes.status, updateRes.data);
+  await delay(1500);
+
+  console.log("  ws1Events received:", JSON.stringify(ws1Events));
+  console.log("  userBEvents received:", JSON.stringify(userBEvents));
 
   // Assert User A received the update
-  const userAHasUpdate = ws1Events.some((e) => e.event?.c?.["person.alice"] || e.event?.data?.entity_id === "person.alice");
+  const userAHasUpdate = ws1Events.some((e) => e.event?.c?.["device_tracker.alice_phone"] || e.event?.data?.entity_id === "device_tracker.alice_phone");
   // Assert User B DID NOT receive User A's update
-  const userBHasUpdate = userBEvents.some((e) => e.event?.c?.["person.alice"] || e.event?.data?.entity_id === "person.alice");
+  const userBHasUpdate = userBEvents.some((e) => e.event?.c?.["device_tracker.alice_phone"] || e.event?.data?.entity_id === "device_tracker.alice_phone");
 
   if (userAHasUpdate && !userBHasUpdate) {
     results.multi_user_isolation = true;

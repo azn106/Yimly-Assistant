@@ -2432,14 +2432,14 @@ app.delete("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res)
     return res.status(404).json({ detail: "Device not found" });
   }
 
-  // Remove the entity_state
-  db.entity_states.splice(dtIndex, 1);
+  const removedEntity = db.entity_states.splice(dtIndex, 1)[0];
 
-  // If there are associated devices in db.devices matching device tracker or webhook, clean up
-  if (db.devices && Array.isArray(db.devices)) {
+  // If this was a primary device_tracker entity, clean up associated device registration
+  if (entityId.startsWith("device_tracker.") && db.devices && Array.isArray(db.devices)) {
     db.devices = db.devices.filter((d) => {
       if (d.user_id !== userId) return true;
-      if (d.device_id && entityId.includes(d.device_id)) return false;
+      const dtSlug = (d.device_name || d.device_id || "").toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
+      if (entityId === `device_tracker.${dtSlug}`) return false;
       return true;
     });
   }
@@ -2454,6 +2454,19 @@ app.delete("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res)
   }
 
   saveDB(db);
+
+  broadcastStateUpdate({
+    event_type: "state_changed",
+    data: {
+      entity_id: entityId,
+      old_state: removedEntity,
+      new_state: null
+    },
+    context: {
+      id: `ctx_${Date.now()}`,
+      user_id: userId
+    }
+  });
 
   res.json({ success: true, message: "Device deleted successfully" });
 });
@@ -2957,7 +2970,7 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
       let counter = 1;
       while (true) {
         const existingEntity = db.entity_states.find((e: any) => e.entity_id === candidateEntityId);
-        if (!existingEntity || existingEntity.device_id === deviceId) {
+        if (!existingEntity || existingEntity.user_id === userId || existingEntity.device_id === deviceId) {
           entityId = candidateEntityId;
           break;
         }
@@ -2992,6 +3005,7 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
     // Upsert entity state
     const now = new Date().toISOString();
     const existingIdx = db.entity_states.findIndex((e: any) => e.entity_id === entityId);
+    const oldEntityState = existingIdx !== -1 ? { ...db.entity_states[existingIdx], attributes: { ...(db.entity_states[existingIdx].attributes || {}) } } : null;
     const updatedEntity: EntityStateData = {
       entity_id: entityId,
       user_id: userId,
@@ -3005,6 +3019,7 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
         icon: data?.icon,
         ...(data?.attributes || {})
       },
+      last_changed: oldEntityState?.state !== String(data?.state ?? "unknown") ? now : (oldEntityState?.last_changed || now),
       last_updated: now
     };
 
@@ -3014,6 +3029,19 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
       db.entity_states.push(updatedEntity);
     }
     saveDB(db);
+
+    broadcastStateUpdate({
+      event_type: "state_changed",
+      data: {
+        entity_id: entityId,
+        old_state: oldEntityState,
+        new_state: updatedEntity
+      },
+      context: {
+        id: `ctx_${entityId}`,
+        user_id: userId
+      }
+    });
 
     return res.status(201).json({ success: true });
   }
@@ -3097,7 +3125,7 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
       let counter = 1;
       while (true) {
         const existingEntity = db.entity_states.find((e: any) => e.entity_id === candidateEntityId);
-        if (!existingEntity || (matchingDevice && existingEntity.device_id === deviceId)) {
+        if (!existingEntity || existingEntity.user_id === userId || (matchingDevice && existingEntity.device_id === deviceId)) {
           entityId = candidateEntityId;
           break;
         }
@@ -3110,22 +3138,34 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
     if (lat != null && lon != null) {
       const now = new Date().toISOString();
       const existingIdx = db.entity_states.findIndex((e) => e.entity_id === entityId);
+      const existingEntity = existingIdx !== -1 ? db.entity_states[existingIdx] : null;
+      const oldState = existingEntity ? { ...existingEntity, attributes: { ...(existingEntity.attributes || {}) } } : null;
       
+      const existingAttrs = existingEntity?.attributes || {};
+      const newAttrs: Record<string, any> = {
+        ...existingAttrs,
+        friendly_name: req.body.device_name || (matchingDevice ? matchingDevice.device_name : (existingAttrs.friendly_name || "Companion Phone")),
+        battery_level: battery,
+        gps_accuracy: accuracy,
+        platform: existingAttrs.platform || "Android",
+        location_visibility: existingAttrs.location_visibility || "family",
+        map_icon: existingAttrs.map_icon || "Phone"
+      };
+      const speedVal = data?.speed ?? data?.location?.speed ?? req.body.speed;
+      if (speedVal != null) {
+        newAttrs.speed = Number(speedVal);
+      }
+
       const updatedState: EntityStateData = {
         entity_id: entityId,
         user_id: userId,
+        device_id: deviceId,
         domain: "device_tracker",
         state: "not_home",
-        attributes: {
-          friendly_name: req.body.device_name || (matchingDevice ? matchingDevice.device_name : (existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.friendly_name : "Companion Phone")),
-          battery_level: battery,
-          gps_accuracy: accuracy,
-          platform: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.platform || "Android" : "Android",
-          location_visibility: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.location_visibility || "family" : "family",
-          map_icon: existingIdx !== -1 ? db.entity_states[existingIdx].attributes?.map_icon || "Phone" : "Phone"
-        },
+        attributes: newAttrs,
         latitude: Number(lat),
         longitude: Number(lon),
+        last_changed: existingEntity?.state !== "not_home" ? now : (existingEntity?.last_changed || now),
         last_updated: now
       };
 
@@ -3175,7 +3215,12 @@ app.post("/api/webhook/:webhook_id", (req, res) => {
         event_type: "state_changed",
         data: {
           entity_id: entityId,
+          old_state: oldState,
           new_state: updatedState
+        },
+        context: {
+          id: `ctx_${entityId}`,
+          user_id: userId
         }
       });
 
@@ -3203,81 +3248,6 @@ app.get("/api/states", authenticateToken, (req: AuthRequest, res) => {
   db = loadDB();
   const userStates = db.entity_states.filter((e) => e.user_id === req.user!.id);
   res.json(userStates);
-});
-
-app.post("/api/states/:entityId", authenticateToken, (req: AuthRequest, res) => {
-  db = loadDB();
-  const rawEntityId = req.params.entityId;
-  const entityId = (Array.isArray(rawEntityId) ? rawEntityId[0] : rawEntityId) as string;
-  const { state, attributes } = req.body;
-  const now = new Date().toISOString();
-
-  let existing = db.entity_states.find((e) => e.entity_id === entityId && e.user_id === req.user!.id);
-  const oldState = existing ? { ...existing, attributes: { ...(existing.attributes || {}) } } : null;
-
-  if (existing) {
-    if (existing.state !== String(state)) {
-      existing.last_changed = now;
-    }
-    existing.last_updated = now;
-    existing.state = String(state);
-    existing.attributes = attributes ? { ...attributes } : existing.attributes;
-  } else {
-    const newEntry: EntityStateData = {
-      entity_id: entityId,
-      state: String(state != null ? state : "unknown"),
-      attributes: attributes || {},
-      last_changed: now,
-      last_updated: now,
-      user_id: req.user!.id,
-      domain: entityId.split(".")[0] || "sensor"
-    };
-    db.entity_states.push(newEntry);
-    existing = newEntry;
-  }
-  saveDB(db);
-
-  broadcastStateUpdate({
-    event_type: "state_changed",
-    data: {
-      entity_id: entityId,
-      old_state: oldState,
-      new_state: existing
-    },
-    context: {
-      id: `ctx_${Date.now()}`,
-      user_id: req.user!.id
-    }
-  });
-
-  res.json(existing);
-});
-
-app.delete("/api/states/:entityId", authenticateToken, (req: AuthRequest, res) => {
-  db = loadDB();
-  const rawEntityId = req.params.entityId;
-  const entityId = (Array.isArray(rawEntityId) ? rawEntityId[0] : rawEntityId) as string;
-  const index = db.entity_states.findIndex((e) => e.entity_id === entityId && e.user_id === req.user!.id);
-  if (index === -1) {
-    return res.status(404).json({ detail: "Entity not found" });
-  }
-  const removedEntity = db.entity_states.splice(index, 1)[0];
-  saveDB(db);
-
-  broadcastStateUpdate({
-    event_type: "state_changed",
-    data: {
-      entity_id: entityId,
-      old_state: removedEntity,
-      new_state: null
-    },
-    context: {
-      id: `ctx_${Date.now()}`,
-      user_id: req.user!.id
-    }
-  });
-
-  res.json({ message: `Entity ${entityId} deleted.` });
 });
 
 app.get(["/api/history/period", "/api/history/period/:timestamp"], authenticateToken, (req: AuthRequest, res) => {

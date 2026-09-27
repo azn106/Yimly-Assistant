@@ -139,47 +139,6 @@ async def api_get_state(
         context={"id": f"ctx_{state_obj.entity_id}", "user_id": str(user.id)}
     )
 
-@router.post("/api/states/{entity_id}", response_model=EntityStateResponse)
-async def api_set_state(
-    entity_id: str,
-    payload: Dict[str, Any],
-    user: User = Depends(require_authenticated_user),
-    db: AsyncSession = Depends(get_db)
-) -> EntityStateResponse:
-    state_val = payload.get("state")
-    if state_val is None:
-        raise HTTPException(status_code=400, detail="The 'state' field is required in the body payload.")
-    
-    attributes = payload.get("attributes", {})
-    
-    entity = await StateService.set_state(
-        db=db,
-        user_id=user.id,
-        entity_id=entity_id,
-        state=str(state_val),
-        attributes=attributes
-    )
-    
-    return EntityStateResponse(
-        entity_id=entity.entity_id,
-        state=entity.state,
-        attributes=entity.attributes,
-        last_changed=entity.last_changed.isoformat(),
-        last_updated=entity.last_updated.isoformat(),
-        context={"id": f"ctx_{entity.entity_id}", "user_id": str(user.id)}
-    )
-
-@router.delete("/api/states/{entity_id}")
-async def api_delete_state(
-    entity_id: str,
-    user: User = Depends(require_authenticated_user),
-    db: AsyncSession = Depends(get_db)
-):
-    success = await StateService.delete_state(db=db, user_id=user.id, entity_id=entity_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Entity not found")
-    return {"message": f"Entity {entity_id} deleted."}
-
 @router.get("/api/components")
 async def api_components(user: User = Depends(require_authenticated_user)):
     return ["api", "websocket", "mobile_app", "device_tracker", "sensor", "binary_sensor"]
@@ -464,9 +423,11 @@ async def api_delete_device(
         raise HTTPException(status_code=404, detail="Device entity not found")
 
     device_id = st.device_id
-    await db.delete(st)
 
-    if device_id:
+    # Call StateService.delete_state to delete entity and fire state_changed removal event
+    await StateService.delete_state(db=db, user_id=user.id, entity_id=entity_id)
+
+    if device_id and st.domain == "device_tracker":
         stmt_dev = select(Device).where(
             Device.id == device_id,
             Device.user_id == user.id
@@ -475,7 +436,6 @@ async def api_delete_device(
         dev = res_dev.scalar_one_or_none()
         if dev:
             await db.delete(dev)
-
-    await db.commit()
+            await db.commit()
 
     return {"success": True, "message": "Device deleted successfully"}
