@@ -158,3 +158,35 @@ class StateService:
         )
 
         return entity
+
+    @staticmethod
+    async def delete_state(db: AsyncSession, user_id: int, entity_id: str) -> bool:
+        stmt = select(EntityState).where(EntityState.entity_id == entity_id)
+        result = await db.execute(stmt)
+        entity = result.scalar_one_or_none()
+        if not entity:
+            return False
+
+        old_state = {
+            "entity_id": entity.entity_id,
+            "state": entity.state,
+            "attributes": entity.attributes,
+            "last_changed": entity.last_changed.isoformat() if entity.last_changed else None,
+            "last_updated": entity.last_updated.isoformat() if entity.last_updated else None
+        }
+
+        await db.delete(entity)
+        await db.commit()
+
+        # Fire state_changed event with new_state=None indicating removal
+        await event_bus.fire(
+            event_type="state_changed",
+            event_data={
+                "entity_id": entity_id,
+                "old_state": old_state,
+                "new_state": None
+            },
+            user_id=user_id
+        )
+        return True
+

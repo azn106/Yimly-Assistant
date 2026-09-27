@@ -169,6 +169,17 @@ async def api_set_state(
         context={"id": f"ctx_{entity.entity_id}", "user_id": str(user.id)}
     )
 
+@router.delete("/api/states/{entity_id}")
+async def api_delete_state(
+    entity_id: str,
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+):
+    success = await StateService.delete_state(db=db, user_id=user.id, entity_id=entity_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return {"message": f"Entity {entity_id} deleted."}
+
 @router.get("/api/components")
 async def api_components(user: User = Depends(require_authenticated_user)):
     return ["api", "websocket", "mobile_app", "device_tracker", "sensor", "binary_sensor"]

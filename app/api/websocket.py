@@ -1,16 +1,263 @@
 import asyncio
-from typing import Any, Dict, Optional
+import fnmatch
+import re
+import time
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from app.core.logging import logger
 from app.core.security import verify_jwt_token
 from app.db.database import async_session_maker
-from app.db.models import User
+from app.db.models import User, Device, EntityState, Place, CircleMember
 from app.services.event_service import event_bus
 from app.services.state_service import StateService
 from app.services.websocket_service import session_manager
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Home Assistant Entity Filter Implementation (Core helpers/entityfilter.py)
+# ---------------------------------------------------------------------------
+
+class EntityFilter:
+    """Matches entities against entity_ids, include/exclude domains, entities, and globs."""
+
+    def __init__(
+        self,
+        entity_ids: Optional[Set[str]] = None,
+        include_domains: Optional[Set[str]] = None,
+        include_entities: Optional[Set[str]] = None,
+        include_globs: Optional[List[str]] = None,
+        exclude_domains: Optional[Set[str]] = None,
+        exclude_entities: Optional[Set[str]] = None,
+        exclude_globs: Optional[List[str]] = None,
+    ) -> None:
+        self.explicit_entity_ids = entity_ids
+        self.include_d = include_domains or set()
+        self.include_e = include_entities or set()
+        self.exclude_d = exclude_domains or set()
+        self.exclude_e = exclude_entities or set()
+
+        self.include_pattern = self._compile_globs(include_globs)
+        self.exclude_pattern = self._compile_globs(exclude_globs)
+
+        self.have_include = bool(self.include_e or self.include_d or self.include_pattern)
+        self.have_exclude = bool(self.exclude_e or self.exclude_d or self.exclude_pattern)
+
+    @staticmethod
+    def _compile_globs(globs: Optional[List[str]]) -> Optional[re.Pattern]:
+        if not globs:
+            return None
+        patterns = [fnmatch.translate(g) for g in globs if g]
+        if not patterns:
+            return None
+        return re.compile("|".join(patterns))
+
+    def matches(self, entity_id: str) -> bool:
+        # If top-level entity_ids was explicitly given, entity must be present in it
+        if self.explicit_entity_ids is not None:
+            if entity_id not in self.explicit_entity_ids:
+                return False
+
+        # If neither include nor exclude are specified, match everything
+        if not self.have_include and not self.have_exclude:
+            return True
+
+        domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+
+        # Case 2: Only includes
+        if self.have_include and not self.have_exclude:
+            return (
+                entity_id in self.include_e
+                or domain in self.include_d
+                or bool(self.include_pattern and self.include_pattern.match(entity_id))
+            )
+
+        # Case 3: Only excludes
+        if not self.have_include and self.have_exclude:
+            return not (
+                entity_id in self.exclude_e
+                or domain in self.exclude_d
+                or bool(self.exclude_pattern and self.exclude_pattern.match(entity_id))
+            )
+
+        # Case 4: Domain and/or glob includes (may also have excludes)
+        if self.include_d or self.include_pattern:
+            return entity_id in self.include_e or (
+                entity_id not in self.exclude_e
+                and (
+                    bool(self.include_pattern and self.include_pattern.match(entity_id))
+                    or (
+                        domain in self.include_d
+                        and not (self.exclude_pattern and self.exclude_pattern.match(entity_id))
+                    )
+                )
+            )
+
+        # Case 5: Domain and/or glob excludes (no domain and/or glob includes)
+        if self.exclude_d or self.exclude_pattern:
+            if domain in self.exclude_d or bool(self.exclude_pattern and self.exclude_pattern.match(entity_id)):
+                return entity_id in self.include_e
+            return entity_id not in self.exclude_e
+
+        # Fallback: only include_e and exclude_e
+        return entity_id in self.include_e and entity_id not in self.exclude_e
+
+
+def extract_entity_filter(msg: Dict[str, Any]) -> EntityFilter:
+    explicit_entity_ids = None
+    if "entity_ids" in msg and isinstance(msg["entity_ids"], list):
+        explicit_entity_ids = set(str(e) for e in msg["entity_ids"] if e)
+
+    inc = msg.get("include") if isinstance(msg.get("include"), dict) else {}
+    exc = msg.get("exclude") if isinstance(msg.get("exclude"), dict) else {}
+
+    def ensure_list(v: Any) -> List[str]:
+        if isinstance(v, list):
+            return [str(x) for x in v if x is not None]
+        if isinstance(v, str):
+            return [v]
+        return []
+
+    include_domains = set(ensure_list(inc.get("domains") or msg.get("include_domains")))
+    include_entities = set(ensure_list(inc.get("entities") or msg.get("include_entities")))
+    include_globs = ensure_list(inc.get("entity_globs") or msg.get("include_entity_globs"))
+
+    exclude_domains = set(ensure_list(exc.get("domains") or msg.get("exclude_domains")))
+    exclude_entities = set(ensure_list(exc.get("entities") or msg.get("exclude_entities")))
+    exclude_globs = ensure_list(exc.get("entity_globs") or msg.get("exclude_entity_globs"))
+
+    return EntityFilter(
+        entity_ids=explicit_entity_ids,
+        include_domains=include_domains,
+        include_entities=include_entities,
+        include_globs=include_globs,
+        exclude_domains=exclude_domains,
+        exclude_entities=exclude_entities,
+        exclude_globs=exclude_globs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compressed Entity Serialization (HA Core as_compressed_state & messages.py)
+# ---------------------------------------------------------------------------
+
+def to_timestamp_seconds(val: Any, default_val: float) -> float:
+    if val is None:
+        return default_val
+    if isinstance(val, (int, float)):
+        return float(val)
+    if hasattr(val, "timestamp"):
+        return val.timestamp()
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return default_val
+    return default_val
+
+
+def build_compressed_entity_state(
+    state_val: Any,
+    attributes: Optional[Dict[str, Any]],
+    context_obj: Any,
+    last_changed: Any,
+    last_updated: Any
+) -> Dict[str, Any]:
+    now_ts = time.time()
+    lc_ts = to_timestamp_seconds(last_changed, now_ts)
+    lu_ts = to_timestamp_seconds(last_updated, lc_ts)
+
+    # Format context
+    ctx = "ctx"
+    if isinstance(context_obj, str):
+        ctx = context_obj
+    elif isinstance(context_obj, dict):
+        if context_obj.get("parent_id") is None and context_obj.get("user_id") is None and "id" in context_obj:
+            ctx = str(context_obj["id"])
+        else:
+            ctx = {k: v for k, v in context_obj.items() if v is not None}
+
+    s_str = "unknown" if state_val is None else str(state_val)
+
+    compressed: Dict[str, Any] = {
+        "s": s_str,
+        "a": attributes or {},
+        "c": ctx,
+        "lc": lc_ts
+    }
+    # HA Core: omit 'lu' if last_updated == last_changed
+    if lu_ts != lc_ts:
+        compressed["lu"] = lu_ts
+
+    return compressed
+
+
+def build_state_diff_event(
+    entity_id: str,
+    old_state: Optional[Dict[str, Any]],
+    new_state: Optional[Dict[str, Any]],
+    context_obj: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    # Case 1: Entity removed/deleted
+    if new_state is None:
+        return {"r": [entity_id]}
+
+    ctx = context_obj or {}
+    ctx_val: Union[str, Dict[str, Any]] = ctx.get("id") or f"ctx_{entity_id}"
+    if ctx.get("user_id") is not None or ctx.get("parent_id") is not None:
+        ctx_val = {k: v for k, v in ctx.items() if v is not None}
+
+    # Case 2: Entity added
+    if old_state is None:
+        compressed = build_compressed_entity_state(
+            state_val=new_state.get("state"),
+            attributes=new_state.get("attributes"),
+            context_obj=ctx_val,
+            last_changed=new_state.get("last_changed"),
+            last_updated=new_state.get("last_updated")
+        )
+        return {"a": {entity_id: compressed}}
+
+    # Case 3: Entity changed
+    additions: Dict[str, Any] = {}
+    diff: Dict[str, Any] = {"+": additions}
+
+    old_s = str(old_state.get("state", ""))
+    new_s = str(new_state.get("state", ""))
+    if old_s != new_s:
+        additions["s"] = new_s
+
+    now_ts = time.time()
+    old_lc = to_timestamp_seconds(old_state.get("last_changed"), now_ts)
+    new_lc = to_timestamp_seconds(new_state.get("last_changed"), now_ts)
+    old_lu = to_timestamp_seconds(old_state.get("last_updated"), old_lc)
+    new_lu = to_timestamp_seconds(new_state.get("last_updated"), new_lc)
+
+    if old_lc != new_lc:
+        additions["lc"] = new_lc
+    elif old_lu != new_lu:
+        additions["lu"] = new_lu
+
+    additions["c"] = ctx_val
+
+    old_attrs = old_state.get("attributes") or {}
+    new_attrs = new_state.get("attributes") or {}
+
+    added_attrs = {
+        k: v for k, v in new_attrs.items()
+        if k not in old_attrs or old_attrs[k] != v
+    }
+    if added_attrs:
+        additions["a"] = added_attrs
+
+    removed_keys = list(old_attrs.keys() - new_attrs.keys())
+    if removed_keys:
+        diff["-"] = {"a": removed_keys}
+
+    return {"c": {entity_id: diff}}
+
 
 async def session_keepalive(session: Any) -> None:
     """Keeps session alive. WS protocol ping/pong is handled at transport layer."""
@@ -19,6 +266,11 @@ async def session_keepalive(session: Any) -> None:
             await asyncio.sleep(25)
     except asyncio.CancelledError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Endpoint Lifecycle
+# ---------------------------------------------------------------------------
 
 @router.websocket("/api/websocket")
 async def websocket_endpoint(websocket: WebSocket):
@@ -170,6 +422,11 @@ async def websocket_endpoint(websocket: WebSocket):
             f"[conn_id={session.id}, user_id={session.user_id}, duration={duration}s]"
         )
 
+
+# ---------------------------------------------------------------------------
+# Command Dispatcher
+# ---------------------------------------------------------------------------
+
 async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str, Any]) -> None:
     user_id = session.user_id
 
@@ -248,6 +505,15 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
         })
 
     elif cmd_type == "subscribe_events":
+        if cmd_id in session.subscriptions:
+            await session.send_json({
+                "id": cmd_id,
+                "type": "result",
+                "success": False,
+                "error": {"code": "id_reuse", "message": "Identifier values have to increase."}
+            })
+            return
+
         event_type = msg.get("event_type", "state_changed")
 
         # Define dynamic callback to send events belonging to this session's user
@@ -256,7 +522,7 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
             event_user_id = event_obj.get("context", {}).get("user_id")
             if event_user_id is None or event_user_id == user_id or str(event_user_id) == str(user_id):
                 await session.send_json({
-                    "id": cmd_id,  # Critical: Must match client's subscription request ID!
+                    "id": cmd_id,  # Must match client's subscription request ID
                     "type": "event",
                     "event": event_obj
                 })
@@ -274,28 +540,34 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
         logger.info(f"User {user_id} subscribed to WebSocket event type: {event_type} (sub_id: {cmd_id})")
 
     elif cmd_type == "subscribe_entities":
-        entity_ids = msg.get("entity_ids")
-        filter_set = set(entity_ids) if isinstance(entity_ids, list) and entity_ids else None
+        if cmd_id in session.subscriptions:
+            await session.send_json({
+                "id": cmd_id,
+                "type": "result",
+                "success": False,
+                "error": {"code": "id_reuse", "message": "Identifier values have to increase."}
+            })
+            return
+
+        entity_filter = extract_entity_filter(msg)
 
         async with async_session_maker() as db:
             entities = await StateService.get_all_states(db, user_id)
 
         now_ts = time.time()
-        initial_entities = {}
+        initial_entities: Dict[str, Any] = {}
         for e in entities:
-            if filter_set and e.entity_id not in filter_set:
+            if not entity_filter.matches(e.entity_id):
                 continue
-            lc = e.last_changed.timestamp() if hasattr(e.last_changed, "timestamp") else now_ts
-            lu = e.last_updated.timestamp() if hasattr(e.last_updated, "timestamp") else now_ts
-            initial_entities[e.entity_id] = {
-                "s": str(e.state),
-                "a": e.attributes or {},
-                "c": f"ctx_{e.entity_id}",
-                "lc": lc,
-                "lu": lu
-            }
+            initial_entities[e.entity_id] = build_compressed_entity_state(
+                state_val=e.state,
+                attributes=e.attributes,
+                context_obj=f"ctx_{e.entity_id}",
+                last_changed=e.last_changed,
+                last_updated=e.last_updated
+            )
 
-        # 1. Acknowledge subscription success
+        # 1. Acknowledge subscription success (send result confirmation first)
         await session.send_json({
             "id": cmd_id,
             "type": "result",
@@ -303,7 +575,7 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
             "result": None
         })
 
-        # 2. Emit initial entities dump under "a" key
+        # 2. Emit initial entities snapshot under "a" key
         await session.send_json({
             "id": cmd_id,
             "type": "event",
@@ -312,36 +584,30 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
             }
         })
 
-        # 3. Stream state_changed updates as diffs under "c"
+        # 3. Stream live state_changed updates matching filter
         async def entity_diff_callback(event_obj: Dict[str, Any]) -> None:
+            # Enforce user boundary/isolation
             event_user_id = event_obj.get("context", {}).get("user_id")
             if event_user_id is not None and event_user_id != user_id and str(event_user_id) != str(user_id):
                 return
 
             data = event_obj.get("data", {})
             entity_id = data.get("entity_id")
-            if not entity_id or (filter_set and entity_id not in filter_set):
+            if not entity_id or not entity_filter.matches(entity_id):
                 return
 
-            new_state_obj = data.get("new_state", {})
-            now_t = time.time()
-            await session.send_json({
-                "id": cmd_id,
-                "type": "event",
-                "event": {
-                    "c": {
-                        entity_id: {
-                            "+": {
-                                "s": str(new_state_obj.get("state", "")),
-                                "a": new_state_obj.get("attributes", {}),
-                                "lu": now_t,
-                                "lc": now_t,
-                                "c": event_obj.get("context", {}).get("id") or f"ctx_{cmd_id}"
-                            }
-                        }
-                    }
-                }
-            })
+            diff_event = build_state_diff_event(
+                entity_id=entity_id,
+                old_state=data.get("old_state"),
+                new_state=data.get("new_state"),
+                context_obj=event_obj.get("context")
+            )
+            if diff_event:
+                await session.send_json({
+                    "id": cmd_id,
+                    "type": "event",
+                    "event": diff_event
+                })
 
         unsubscribe_func = event_bus.subscribe("state_changed", entity_diff_callback)
         session.subscriptions[cmd_id] = unsubscribe_func
@@ -367,7 +633,7 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
                 "id": cmd_id,
                 "type": "result",
                 "success": False,
-                "error": {"code": "not_found", "message": "Subscription ID not active or found."}
+                "error": {"code": "not_found", "message": "Subscription not found."}
             })
 
     elif cmd_type == "get_services":
@@ -411,7 +677,6 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
 
     elif cmd_type == "config/device_registry/list":
         async with async_session_maker() as db:
-            from app.db.models import Device
             stmt = select(Device).where(Device.user_id == user_id)
             res = await db.execute(stmt)
             devices = res.scalars().all()
@@ -439,7 +704,6 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
 
     elif cmd_type == "config/entity_registry/list":
         async with async_session_maker() as db:
-            from app.db.models import EntityState
             stmt = select(EntityState).where(EntityState.user_id == user_id)
             res = await db.execute(stmt)
             entities = res.scalars().all()
@@ -464,9 +728,46 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
                 "result": entity_list
             })
 
+    elif cmd_type == "config/entity_registry/list_for_display":
+        async with async_session_maker() as db:
+            stmt = select(EntityState).where(EntityState.user_id == user_id)
+            res = await db.execute(stmt)
+            entities = res.scalars().all()
+            display_entities = [
+                {
+                    "entity_id": e.entity_id,
+                    "name": e.attributes.get("friendly_name") if isinstance(e.attributes, dict) else None,
+                    "icon": e.attributes.get("icon") if isinstance(e.attributes, dict) else None,
+                    "platform": "mobile_app",
+                    "device_id": str(e.device_id) if e.device_id else None,
+                    "area_id": None,
+                    "disabled_by": None,
+                    "hidden_by": None,
+                    "entity_category": None,
+                    "translation_key": None
+                }
+                for e in entities
+            ]
+            await session.send_json({
+                "id": cmd_id,
+                "type": "result",
+                "success": True,
+                "result": {
+                    "entity_categories": {},
+                    "entities": display_entities
+                }
+            })
+
+    elif cmd_type == "config/floor_registry/list":
+        await session.send_json({
+            "id": cmd_id,
+            "type": "result",
+            "success": True,
+            "result": []
+        })
+
     elif cmd_type == "config/area_registry/list":
         async with async_session_maker() as db:
-            from app.db.models import Place, CircleMember
             stmt_circles = select(CircleMember.circle_id).where(CircleMember.user_id == user_id)
             res_circles = await db.execute(stmt_circles)
             circle_ids = res_circles.scalars().all()
@@ -513,6 +814,7 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
         "subscribe_trigger",
         "persistent_notification/subscribe",
         "mobile_app/push_notification_channel",
+        "mobile_app/push_notification_confirm",
         "mobile_app/get_push_notifications",
         "sensor/push",
         "camera/stream",
