@@ -60,4 +60,4 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:3000/api/config || exit 1
 
 # Start production server
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3000", "--proxy-headers", "--forwarded-allow-ips", "*", "--ws-ping-interval", "0", "--ws-ping-timeout", "300"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3000", "--proxy-headers", "--forwarded-allow-ips", "*", "--ws-ping-interval", "15", "--ws-ping-timeout", "30"]
