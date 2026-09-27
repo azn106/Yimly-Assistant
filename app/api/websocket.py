@@ -137,10 +137,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     "error": {"code": "internal_error", "message": f"Error executing command '{cmd_type}'."}
                 })
 
-    except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for user {session.user_id}")
+    except WebSocketDisconnect as wsd:
+        logger.info(f"WebSocket disconnected for user {session.user_id} (code: {getattr(wsd, 'code', '1000')})")
     except Exception as e:
-        logger.error(f"WebSocket processing loop error: {e}")
+        logger.error(f"WebSocket processing loop error for user {session.user_id}: {type(e).__name__}: {e}")
     finally:
         keepalive_task.cancel()
         session_manager.disconnect(session)
