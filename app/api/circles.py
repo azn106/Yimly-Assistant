@@ -238,12 +238,7 @@ async def list_circle_members(
             if dt.latitude is not None and dt.longitude is not None:
                 attrs = dt.attributes if isinstance(dt.attributes, dict) else {}
                 friendly_name = attrs.get("friendly_name") or dt.entity_id
-                battery_val = attrs.get("battery")
-                if battery_val is None:
-                    battery_val = attrs.get("battery_level")
-                if battery_val is None:
-                    battery_val = attrs.get("battery_bar")
-                battery = battery_val
+                battery = attrs.get("battery") or attrs.get("battery_level") or attrs.get("battery_bar")
                 accuracy = attrs.get("gps_accuracy")
                 map_icon = attrs.get("map_icon") or "📱 Phone"
                 loc_vis = attrs.get("location_visibility") or "family"
@@ -260,7 +255,6 @@ async def list_circle_members(
                     latitude=dt.latitude,
                     longitude=dt.longitude,
                     battery=battery,
-                    charging=attrs.get("charging"),
                     accuracy=accuracy,
                     last_updated=last_updated_str,
                     map_icon=map_icon,

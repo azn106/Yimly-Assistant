@@ -24,7 +24,6 @@ class MemberDeviceLocation(BaseModel):
     latitude: float
     longitude: float
     battery: Optional[Any] = None
-    charging: Optional[bool] = None
     accuracy: Optional[float] = None
     last_updated: str
     map_icon: Optional[str] = None

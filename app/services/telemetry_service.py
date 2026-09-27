@@ -116,53 +116,24 @@ class TelemetryService:
             entity_name = f"device_{device.id}"
         entity_id = f"device_tracker.{entity_name}"
 
-        # Update last_known_battery if battery is provided in location update
-        if data.battery is not None:
-            try:
-                battery_val = float(data.battery)
-                if 0.0 <= battery_val <= 100.0:
-                    device.last_known_battery = battery_val
-                    await db.commit()
-                    # Trigger potential alerts
-                    try:
-                        await TelemetryService._evaluate_low_battery(db, device, data)
-                    except Exception as low_batt_err:
-                        import logging
-                        logging.getLogger("ha_server").error(f"Error evaluating low battery from location update: {low_batt_err}")
-            except (ValueError, TypeError):
-                pass
-
         # Determine if "home" or "not_home" (near the configured latitude/longitude from config)
         # We can read home lat/lon from a configuration. Let's default to server 0,0 or check if it's within 100 meters
         # In a real environment, the server is set to a specific location.
         distance_to_home = haversine_distance(data.latitude, data.longitude, 0.0, 0.0)
         state_val = "home" if distance_to_home <= 150.0 else "not_home"
 
-        # Fetch existing state attributes to avoid wiping them out (e.g. charging/battery state)
-        existing_state = await StateService.get_state(db, device.user_id, entity_id)
-        existing_attrs = existing_state.attributes if (existing_state and isinstance(existing_state.attributes, dict)) else {}
-
-        # Fallback to device's last known battery if not in payload
-        effective_battery = data.battery if data.battery is not None else device.last_known_battery
-        if effective_battery is None:
-            effective_battery = existing_attrs.get("battery") or existing_attrs.get("battery_level")
-
-        # Build state attributes, starting with existing ones to preserve custom metadata/charging state
-        attributes = dict(existing_attrs)
-        attributes.update({
+        # Build state attributes
+        attributes = {
             "latitude": data.latitude,
             "longitude": data.longitude,
             "gps_accuracy": data.gps_accuracy,
             "altitude": data.altitude,
             "speed": data.speed,
             "course": data.bearing,
+            "battery_level": data.battery,
             "friendly_name": device.device_name,
             "source_type": "gps"
-        })
-
-        if effective_battery is not None:
-            attributes["battery_level"] = effective_battery
-            attributes["battery"] = effective_battery
+        }
 
         # Filter out None values
         attributes = {k: v for k, v in attributes.items() if v is not None}
@@ -461,112 +432,6 @@ class TelemetryService:
                 attributes=attributes,
                 device_id=device.id
             )
-
-            # Sync battery level / battery state updates directly to corresponding device_tracker entity
-            is_battery_level_sensor = (
-                reg.unique_id == "battery_level" or
-                reg.device_class == "battery" or
-                "battery_level" in reg.entity_id.lower()
-            )
-            is_battery_state_sensor = (
-                reg.unique_id == "battery_state" or
-                reg.device_class == "battery_state" or
-                "battery_state" in reg.entity_id.lower()
-            )
-            is_charging_sensor = (
-                reg.unique_id == "is_charging" or
-                "is_charging" in reg.entity_id.lower()
-            )
-
-            if is_battery_level_sensor:
-                try:
-                    battery_val = float(item.state)
-                except (ValueError, TypeError):
-                    battery_val = None
-
-                if battery_val is not None and 0.0 <= battery_val <= 100.0:
-                    # Update Device model's last known battery & low battery status
-                    device.last_known_battery = battery_val
-                    await db.commit()
-
-                    # Trigger potential alerts
-                    try:
-                        from app.schemas.telemetry import LocationUpdateData
-                        loc_data = LocationUpdateData(battery=battery_val)
-                        await TelemetryService._evaluate_low_battery(db, device, loc_data)
-                    except Exception as low_batt_err:
-                        import logging
-                        logging.getLogger("ha_server").error(f"Error evaluating low battery from sensor update: {low_batt_err}")
-
-                    # Find and update corresponding device_tracker entity
-                    entity_name = slugify(device.device_name) or f"device_{device.id}"
-                    tracker_entity_id = f"device_tracker.{entity_name}"
-                    
-                    tracker_state = await StateService.get_state(db, device.user_id, tracker_entity_id)
-                    if tracker_state:
-                        tracker_attrs = dict(tracker_state.attributes) if isinstance(tracker_state.attributes, dict) else {}
-                        tracker_attrs["battery_level"] = battery_val
-                        tracker_attrs["battery"] = battery_val
-                        
-                        await StateService.set_state(
-                            db=db,
-                            user_id=device.user_id,
-                            entity_id=tracker_entity_id,
-                            state=tracker_state.state,
-                            attributes=tracker_attrs,
-                            device_id=device.id,
-                            latitude=tracker_state.latitude,
-                            longitude=tracker_state.longitude
-                        )
-
-            elif is_battery_state_sensor and item.state:
-                battery_state_val = str(item.state).strip().lower()
-                is_charging_val = battery_state_val in ("charging", "full", "charging_ac", "charging_usb", "charging_wireless")
-                entity_name = slugify(device.device_name) or f"device_{device.id}"
-                tracker_entity_id = f"device_tracker.{entity_name}"
-                
-                tracker_state = await StateService.get_state(db, device.user_id, tracker_entity_id)
-                if tracker_state:
-                    tracker_attrs = dict(tracker_state.attributes) if isinstance(tracker_state.attributes, dict) else {}
-                    tracker_attrs["battery_state"] = battery_state_val
-                    tracker_attrs["battery_status"] = battery_state_val
-                    tracker_attrs["charging"] = is_charging_val
-                    
-                    await StateService.set_state(
-                        db=db,
-                        user_id=device.user_id,
-                        entity_id=tracker_entity_id,
-                        state=tracker_state.state,
-                        attributes=tracker_attrs,
-                        device_id=device.id,
-                        latitude=tracker_state.latitude,
-                        longitude=tracker_state.longitude
-                    )
-
-            elif is_charging_sensor and item.state is not None:
-                val_str = str(item.state).strip().lower()
-                is_charging_val = val_str in ("on", "true", "yes", "charging")
-                entity_name = slugify(device.device_name) or f"device_{device.id}"
-                tracker_entity_id = f"device_tracker.{entity_name}"
-                
-                tracker_state = await StateService.get_state(db, device.user_id, tracker_entity_id)
-                if tracker_state:
-                    tracker_attrs = dict(tracker_state.attributes) if isinstance(tracker_state.attributes, dict) else {}
-                    tracker_attrs["charging"] = is_charging_val
-                    tracker_attrs["battery_state"] = "charging" if is_charging_val else "discharging"
-                    tracker_attrs["battery_status"] = "charging" if is_charging_val else "discharging"
-                    
-                    await StateService.set_state(
-                        db=db,
-                        user_id=device.user_id,
-                        entity_id=tracker_entity_id,
-                        state=tracker_state.state,
-                        attributes=tracker_attrs,
-                        device_id=device.id,
-                        latitude=tracker_state.latitude,
-                        longitude=tracker_state.longitude
-                    )
-
             results[item.unique_id] = {"success": True}
 
         return results

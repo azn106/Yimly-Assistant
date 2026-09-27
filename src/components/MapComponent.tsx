@@ -15,7 +15,6 @@ import {
   History, 
   Smartphone, 
   Battery, 
-  BatteryCharging,
   Clock, 
   X,
   ChevronLeft,
@@ -2769,11 +2768,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                       <div className="flex items-center gap-1.5 text-[11px] text-slate-500 font-medium leading-tight mt-0.5 truncate">
                         {primaryDevice?.battery !== undefined && primaryDevice?.battery !== null && (
                           <span className="flex items-center gap-1 shrink-0 font-bold text-slate-600">
-                            {primaryDevice.charging ? (
-                              <BatteryCharging className="w-3 h-3 text-emerald-500 animate-pulse" />
-                            ) : (
-                              <Battery className="w-3 h-3 text-emerald-500" />
-                            )}
+                            <Battery className="w-3 h-3 text-emerald-500" />
                             {primaryDevice.battery}%
                           </span>
                         )}
@@ -2837,11 +2832,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                       <div className="flex flex-wrap items-center justify-center gap-1.5 text-xs text-slate-500 font-medium leading-tight truncate">
                         {primaryDevice?.battery !== undefined && primaryDevice?.battery !== null && (
                           <span className="flex items-center gap-1 shrink-0 font-bold text-slate-600">
-                            {primaryDevice.charging ? (
-                              <BatteryCharging className="w-3.5 h-3.5 text-emerald-500 animate-pulse" />
-                            ) : (
-                              <Battery className="w-3.5 h-3.5 text-emerald-500" />
-                            )}
+                            <Battery className="w-3.5 h-3.5 text-emerald-500" />
                             {primaryDevice.battery}%
                           </span>
                         )}
@@ -2929,11 +2920,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                                       <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-0.5">
                                         {dev.battery !== undefined && dev.battery !== null && (
                                           <span className="flex items-center gap-0.5 font-bold text-slate-600">
-                                            {dev.charging ? (
-                                              <BatteryCharging className="w-3 h-3 text-emerald-500 animate-pulse" />
-                                            ) : (
-                                              <Battery className="w-3 h-3 text-emerald-500" />
-                                            )}
+                                            <Battery className="w-3 h-3 text-emerald-500" />
                                             {dev.battery}%
                                           </span>
                                         )}
@@ -3235,15 +3222,8 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
 
                       {/* Battery Status */}
                       <div className="flex items-center justify-center gap-1.5 text-xs text-slate-500 font-bold">
-                        {primaryDevice?.charging ? (
-                          <BatteryCharging className="w-4 h-4 text-emerald-500 shrink-0 animate-pulse" />
-                        ) : (
-                          <Battery className="w-4 h-4 text-emerald-500 shrink-0" />
-                        )}
-                        <span>
-                          Battery {primaryDevice?.battery !== undefined && primaryDevice?.battery !== null ? `${primaryDevice.battery}%` : "100%"}
-                          {primaryDevice?.charging ? " (Charging)" : ""}
-                        </span>
+                        <Battery className="w-4 h-4 text-emerald-500 shrink-0" />
+                        <span>Battery {primaryDevice?.battery !== undefined && primaryDevice?.battery !== null ? `${primaryDevice.battery}%` : "100%"}</span>
                       </div>
 
                       {/* Ping Device Status Toast / Banner */}
@@ -3458,11 +3438,7 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
                                   <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-0.5">
                                     {dev.battery !== undefined && dev.battery !== null && (
                                       <span className="flex items-center gap-0.5 font-bold text-slate-600">
-                                        {dev.charging ? (
-                                          <BatteryCharging className="w-3 h-3 text-emerald-500 animate-pulse" />
-                                        ) : (
-                                          <Battery className="w-3 h-3 text-emerald-500" />
-                                        )}
+                                        <Battery className="w-3 h-3 text-emerald-500" />
                                         {dev.battery}%
                                       </span>
                                     )}

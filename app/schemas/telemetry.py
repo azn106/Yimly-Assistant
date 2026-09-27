@@ -15,7 +15,6 @@ class LocationUpdateData(BaseModel):
     trigger: Optional[str] = Field(default=None, description="What triggered the location update")
     vertical_accuracy: Optional[float] = Field(default=None, description="Vertical accuracy in meters")
     location_name: Optional[str] = Field(default=None, description="Optional HA zone/location name")
-    zone: Optional[str] = Field(default=None, description="Optional HA zone name alias")
 
     class Config:
         extra = "allow"
@@ -24,14 +23,7 @@ class LocationUpdateData(BaseModel):
     @classmethod
     def parse_ha_payload(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            # 1. Unnest from "location" if present (iOS nested location struct)
-            if "location" in data and isinstance(data["location"], dict):
-                loc = data.pop("location")
-                for k, v in loc.items():
-                    if k not in data or data[k] is None:
-                        data[k] = v
-
-            # 2. Parse HA "gps": [lat, lon]
+            # 1. Parse HA "gps": [lat, lon]
             if "gps" in data and isinstance(data["gps"], (list, tuple)) and len(data["gps"]) >= 2:
                 if "latitude" not in data or data["latitude"] is None:
                     try:
@@ -44,17 +36,13 @@ class LocationUpdateData(BaseModel):
                     except (ValueError, TypeError):
                         pass
 
-            # 3. Parse HA "accuracy" -> "gps_accuracy"
+            # 2. Parse HA "accuracy" -> "gps_accuracy"
             if "accuracy" in data and ("gps_accuracy" not in data or data["gps_accuracy"] is None):
                 data["gps_accuracy"] = data["accuracy"]
 
-            # 4. Parse HA "course" -> "bearing"
+            # 3. Parse HA "course" -> "bearing"
             if "course" in data and ("bearing" not in data or data["bearing"] is None):
                 data["bearing"] = data["course"]
-
-            # 5. Parse HA "zone" -> "location_name"
-            if "zone" in data and ("location_name" not in data or data["location_name"] is None):
-                data["location_name"] = str(data["zone"])
         return data
 
     @field_validator("latitude")
@@ -74,7 +62,7 @@ class LocationUpdateData(BaseModel):
 class SensorRegistrationData(BaseModel):
     unique_id: str = Field(..., description="Unique ID for the sensor")
     name: str = Field(..., description="Readable name of the sensor")
-    type: Optional[str] = Field(default="sensor", description="Type of entity: sensor, binary_sensor, etc.")
+    type: str = Field(default="sensor", description="Type of entity: sensor, binary_sensor, etc.")
     state: Optional[Any] = Field(default=None, description="Initial state of the sensor")
     attributes: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Initial sensor attributes")
     unit_of_measurement: Optional[str] = Field(default=None, description="Unit of measurement")
@@ -87,20 +75,11 @@ class SensorRegistrationData(BaseModel):
     class Config:
         extra = "allow"
 
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_sensor_data(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            if not data.get("type"):
-                data["type"] = "sensor"
-        return data
-
 class SensorStateUpdate(BaseModel):
     unique_id: str = Field(..., description="Unique ID of the registered sensor")
-    state: Optional[Any] = Field(default=None, description="The new state/value of the sensor")
+    state: Any = Field(default=None, description="The new state/value of the sensor")
     attributes: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Attributes for the sensor state")
     type: Optional[str] = Field(default=None, description="Optional entity type")
-    icon: Optional[str] = Field(default=None, description="Optional sensor icon")
 
     class Config:
         extra = "allow"

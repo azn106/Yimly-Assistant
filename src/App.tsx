@@ -382,12 +382,6 @@ export default function App() {
     };
   }, []);
 
-  // WebSocket instance and stable function references
-  const wsRef = useRef<WebSocket | null>(null);
-  const fetchCircleMembersRef = useRef<((circleId: number, silent?: boolean) => Promise<void>) | null>(null);
-  const fetchAlertsRef = useRef(fetchAlerts);
-  fetchAlertsRef.current = fetchAlerts;
-
   // Live WebSocket Connection to Home Assistant backend
   useEffect(() => {
     if (status !== "authenticated") return;
@@ -395,22 +389,17 @@ export default function App() {
     if (!token) return;
 
     let isSubscribed = true;
+    let ws: WebSocket | null = null;
     let reconnectTimeout: any = null;
 
     const connectWebSocket = () => {
       if (!isSubscribed) return;
 
-      // Prevent duplicate connection attempts if already active or connecting
-      if (wsRef.current && (wsRef.current.readyState === WebSocket.CONNECTING || wsRef.current.readyState === WebSocket.OPEN)) {
-        return;
-      }
-
       const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = `${wsProtocol}//${window.location.host}/api/websocket`;
 
       try {
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
+        ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
           console.log("[HA WebSocket] Connected to /api/websocket");
@@ -420,36 +409,26 @@ export default function App() {
           try {
             const data = JSON.parse(event.data);
 
-            if (data.type === "ping") {
-              const pongPayload: any = { type: "pong" };
-              if (data.id !== undefined) pongPayload.id = data.id;
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify(pongPayload));
-              }
-            } else if (data.type === "auth_required") {
+            if (data.type === "auth_required") {
               // Complete handshake challenge with access token
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "auth", access_token: token }));
-              }
+              ws?.send(JSON.stringify({ type: "auth", access_token: token }));
             } else if (data.type === "auth_ok") {
               console.log("[HA WebSocket] Auth successful (auth_ok). Notifying Companion App.");
               // Notify Android / iOS Companion App via External Bus that frontend is connected
               notifyExternalBus("connection-status", { event: "connected" });
 
               // Subscribe to state change events for real-time live map updates
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ id: 1, type: "subscribe_events", event_type: "state_changed" }));
-                ws.send(JSON.stringify({ id: 2, type: "get_states" }));
-                ws.send(JSON.stringify({ id: 3, type: "get_config" }));
-              }
+              ws?.send(JSON.stringify({ id: 1, type: "subscribe_events", event_type: "state_changed" }));
+              ws?.send(JSON.stringify({ id: 2, type: "get_states" }));
+              ws?.send(JSON.stringify({ id: 3, type: "get_config" }));
             } else if (data.type === "auth_invalid") {
               console.warn("[HA WebSocket] Auth invalid.");
               notifyExternalBus("connection-status", { event: "auth-invalid" });
             } else if (data.type === "event" && data.event?.event_type === "state_changed") {
               // Real-time entity state update received: silently refresh circle members & alerts
               if (selectedCircleRef.current) {
-                fetchCircleMembersRef.current?.(selectedCircleRef.current.id, true);
-                fetchAlertsRef.current(selectedCircleRef.current.id, true);
+                fetchCircleMembers(selectedCircleRef.current.id, true);
+                fetchAlerts(selectedCircleRef.current.id, true);
               }
             }
           } catch (err) {
@@ -457,14 +436,10 @@ export default function App() {
           }
         };
 
-        ws.onclose = (evt) => {
-          console.log("[HA WebSocket] Connection closed.", evt.code, evt.reason);
-          if (wsRef.current === ws) {
-            wsRef.current = null;
-          }
-          // ONLY notify external bus and attempt reconnect if session is active (not during intentional component unmount)
+        ws.onclose = () => {
+          console.log("[HA WebSocket] Connection closed.");
+          notifyExternalBus("connection-status", { event: "disconnected" });
           if (isSubscribed) {
-            notifyExternalBus("connection-status", { event: "disconnected" });
             reconnectTimeout = setTimeout(connectWebSocket, 4000);
           }
         };
@@ -472,7 +447,7 @@ export default function App() {
         ws.onerror = (err) => {
           console.warn("[HA WebSocket] Connection error:", err);
           try {
-            ws.close();
+            ws?.close();
           } catch {}
         };
       } catch (e) {
@@ -488,15 +463,13 @@ export default function App() {
     return () => {
       isSubscribed = false;
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      if (wsRef.current) {
-        const socketToClose = wsRef.current;
-        wsRef.current = null;
+      if (ws) {
         try {
-          socketToClose.close();
+          ws.close();
         } catch {}
       }
     };
-  }, [status]);
+  }, [status, fetchAlerts]);
 
   // Run on mount to check existing session, setup status, and register SW
   useEffect(() => {
@@ -563,12 +536,7 @@ export default function App() {
         sessionStorage.setItem("companion_auth_url", authUrl);
         localStorage.setItem("companion_auth_url", authUrl);
       }
-    }
 
-    const token = localStorage.getItem("access_token");
-
-    // If an external-auth bridge is present but no token is in localStorage, perform exchange first
-    if (isExternalAuth && !token) {
       try {
         const externalToken = await requestExternalAuthToken();
         if (externalToken) {
@@ -577,22 +545,15 @@ export default function App() {
       } catch (extErr) {
         console.warn("[ExternalAuth] Error during external auth exchange:", extErr);
       }
-    } else if (isExternalAuth) {
-      // Async token sync in background (non-blocking)
-      requestExternalAuthToken().then((externalToken) => {
-        if (externalToken) {
-          localStorage.setItem("access_token", externalToken);
-        }
-      }).catch(() => {});
     }
 
-    const activeToken = localStorage.getItem("access_token");
+    const token = localStorage.getItem("access_token");
 
-    if (activeToken) {
+    if (token) {
       try {
         const res = await fetch("/api/auth/me", {
           headers: {
-            Authorization: `Bearer ${activeToken}`
+            Authorization: `Bearer ${token}`
           }
         });
 
@@ -601,7 +562,7 @@ export default function App() {
           localStorage.setItem("user_info", JSON.stringify(fetchedUser));
           setUser(fetchedUser);
           setStatus("authenticated");
-          await fetchCircles(activeToken);
+          await fetchCircles(token);
           return;
         } else {
           localStorage.removeItem("access_token");
@@ -704,7 +665,6 @@ export default function App() {
       if (!silent) setCirclesLoading(false);
     }
   };
-  fetchCircleMembersRef.current = fetchCircleMembers;
 
   // CREATE CIRCLE
   const handleCreateCircle = async (name: string) => {
@@ -969,7 +929,7 @@ export default function App() {
   };
 
   return (
-    <div className="w-full h-full h-[100dvh] fixed inset-0 overflow-hidden bg-slate-900 text-slate-900 font-sans select-none">
+    <div className="w-screen h-screen overflow-hidden bg-slate-900 text-slate-900 font-sans relative select-none">
       
       {/* AUTHENTICATED SYSTEM FLOW */}
       {status === "authenticated" ? (
@@ -1308,7 +1268,7 @@ export default function App() {
         </div>
       ) : (
         /* FIRST-RUN SETUP / LOGIN FLOW */
-        <div className="w-full h-full min-h-[100dvh] overflow-y-auto bg-slate-50 flex flex-col justify-between py-12 px-4 sm:px-6 lg:px-8">
+        <div className="min-h-screen bg-slate-50 flex flex-col justify-between py-12 px-4 sm:px-6 lg:px-8">
           <header className="flex flex-col items-center space-y-3 select-none" id="app-header">
             <div className="h-12 w-12 rounded-2xl bg-indigo-50/80 text-indigo-600 flex items-center justify-center shadow-sm border border-indigo-100/30">
               <Home className="h-6 w-6" />
