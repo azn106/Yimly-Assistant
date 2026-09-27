@@ -7,7 +7,7 @@
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
-    "start:production": "uvicorn app.main:app --host 0.0.0.0 --port 3000 --ws-ping-interval 0 --ws-ping-timeout 300",
+    "start:production": "uvicorn app.main:app --host 0.0.0.0 --port 3000 --proxy-headers --forwarded-allow-ips \"*\" --ws-ping-interval 0 --ws-ping-timeout 300",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },
