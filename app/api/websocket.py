@@ -430,7 +430,7 @@ async def websocket_endpoint(websocket: WebSocket):
 async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str, Any]) -> None:
     user_id = session.user_id
 
-    if cmd_type == "auth/current_user":
+    if cmd_type in ("auth/current_user", "user/current"):
         async with async_session_maker() as db:
             stmt = select(User).where(User.id == user_id)
             res = await db.execute(stmt)
@@ -758,13 +758,42 @@ async def handle_command(session: Any, cmd_id: int, cmd_type: str, msg: Dict[str
                 }
             })
 
-    elif cmd_type == "config/floor_registry/list":
+    elif cmd_type in ("config/floor_registry/list", "config/label_registry/list", "config/category_registry/list"):
         await session.send_json({
             "id": cmd_id,
             "type": "result",
             "success": True,
             "result": []
         })
+
+    elif cmd_type == "config/zone_registry/list":
+        async with async_session_maker() as db:
+            stmt_circles = select(CircleMember.circle_id).where(CircleMember.user_id == user_id)
+            res_circles = await db.execute(stmt_circles)
+            circle_ids = res_circles.scalars().all()
+            zone_list = []
+            if circle_ids:
+                stmt_places = select(Place).where(Place.circle_id.in_(circle_ids))
+                res_places = await db.execute(stmt_places)
+                places = res_places.scalars().all()
+                zone_list = [
+                    {
+                        "id": f"zone_{p.id}",
+                        "name": p.name,
+                        "latitude": p.latitude,
+                        "longitude": p.longitude,
+                        "radius": p.radius or 100,
+                        "icon": "mdi:map-marker",
+                        "passive": False
+                    }
+                    for p in places
+                ]
+            await session.send_json({
+                "id": cmd_id,
+                "type": "result",
+                "success": True,
+                "result": zone_list
+            })
 
     elif cmd_type == "config/area_registry/list":
         async with async_session_maker() as db:

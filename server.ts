@@ -771,8 +771,14 @@ function matchesEntityFilter(entityId: string, filter: EntityFilterCriteria): bo
 }
 
 interface ClientSession {
+  id: string;
   ws: WebSocket;
   userId: number | null;
+  connectedAt: number;
+  lastReceivedType: string | null;
+  lastReceivedId: number | null;
+  lastSentType: string | null;
+  lastSentId: number | null;
   eventSubs: Map<number, string>;
   entitySubs: Map<number, EntityFilterCriteria>;
 }
@@ -790,19 +796,41 @@ setInterval(() => {
 }, 25000);
 
 wss.on("connection", (ws: WebSocket) => {
+  const sessionId = crypto.randomBytes(4).toString("hex");
   const session: ClientSession = {
+    id: sessionId,
     ws,
     userId: null,
+    connectedAt: Date.now(),
+    lastReceivedType: null,
+    lastReceivedId: null,
+    lastSentType: null,
+    lastSentId: null,
     eventSubs: new Map(),
     entitySubs: new Map()
   };
   clientSessions.set(ws, session);
 
-  ws.send(JSON.stringify({ type: "auth_required", ha_version: "2026.9.1" }));
+  const sendResponse = (msg: any) => {
+    if (msg && typeof msg === "object") {
+      session.lastSentType = msg.type || null;
+      session.lastSentId = typeof msg.id === "number" ? msg.id : null;
+    }
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
+  };
+
+  sendResponse({ type: "auth_required", ha_version: "2026.9.1" });
 
   ws.on("message", (message: string) => {
     try {
       const data = JSON.parse(message.toString());
+      if (data && typeof data === "object") {
+        session.lastReceivedType = data.type || null;
+        session.lastReceivedId = typeof data.id === "number" ? data.id : null;
+      }
+
       if (data.type === "pong") {
         return;
       }
@@ -816,13 +844,13 @@ wss.on("connection", (ws: WebSocket) => {
             }
           } catch {}
         }
-        ws.send(JSON.stringify({ type: "auth_ok", ha_version: "2026.9.1" }));
-      } else if (data.type === "auth/current_user") {
+        sendResponse({ type: "auth_ok", ha_version: "2026.9.1" });
+      } else if (data.type === "auth/current_user" || data.type === "user/current") {
         db = loadDB();
         const u = session.userId ? db.users.find((user: any) => user.id === session.userId) : (db.users[0] || null);
         const userName = u ? (u.display_name || u.username) : (session.userId ? `User ${session.userId}` : "User");
         const userIdStr = u ? String(u.id) : (session.userId ? String(session.userId) : "1");
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
@@ -834,31 +862,31 @@ wss.on("connection", (ws: WebSocket) => {
             credentials: [],
             mfa_modules: []
           }
-        }));
+        });
       } else if (data.type === "ping") {
-        ws.send(JSON.stringify(data.id !== undefined ? { id: data.id, type: "pong" } : { type: "pong" }));
+        sendResponse(data.id !== undefined ? { id: data.id, type: "pong" } : { type: "pong" });
       } else if (data.type === "supported_features") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+        sendResponse({ id: data.id, type: "result", success: true, result: null });
       } else if (data.type === "subscribe_events") {
         if (session.eventSubs.has(data.id) || session.entitySubs.has(data.id)) {
-          ws.send(JSON.stringify({
+          sendResponse({
             id: data.id,
             type: "result",
             success: false,
             error: { code: "id_reuse", message: "Identifier values have to increase." }
-          }));
+          });
           return;
         }
         session.eventSubs.set(data.id, data.event_type || "state_changed");
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+        sendResponse({ id: data.id, type: "result", success: true, result: null });
       } else if (data.type === "subscribe_entities") {
         if (session.eventSubs.has(data.id) || session.entitySubs.has(data.id)) {
-          ws.send(JSON.stringify({
+          sendResponse({
             id: data.id,
             type: "result",
             success: false,
             error: { code: "id_reuse", message: "Identifier values have to increase." }
-          }));
+          });
           return;
         }
 
@@ -890,32 +918,32 @@ wss.on("connection", (ws: WebSocket) => {
         });
 
         // 1. Send subscription result confirmation first
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+        sendResponse({ id: data.id, type: "result", success: true, result: null });
         // 2. Send initial entity snapshot under 'a'
-        ws.send(JSON.stringify({ id: data.id, type: "event", event: { a: initialEntities } }));
+        sendResponse({ id: data.id, type: "event", event: { a: initialEntities } });
       } else if (data.type === "unsubscribe_events" || data.type === "unsubscribe_entities") {
         const subId = data.subscription;
         if (typeof subId === "number" && (session.eventSubs.has(subId) || session.entitySubs.has(subId))) {
           session.eventSubs.delete(subId);
           session.entitySubs.delete(subId);
-          ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+          sendResponse({ id: data.id, type: "result", success: true, result: null });
         } else {
-          ws.send(JSON.stringify({
+          sendResponse({
             id: data.id,
             type: "result",
             success: false,
             error: { code: "not_found", message: "Subscription not found." }
-          }));
+          });
         }
       } else if (data.type === "subscribe_trigger" || data.type === "persistent_notification/subscribe" ||
                  data.type === "mobile_app/push_notification_channel" || data.type === "mobile_app/push_notification_confirm" ||
                  data.type === "mobile_app/get_push_notifications" || data.type === "sensor/push" ||
                  data.type === "camera/stream" || data.type === "render_template") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: null }));
+        sendResponse({ id: data.id, type: "result", success: true, result: null });
       } else if (data.type === "persistent_notification/get") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: [] }));
+        sendResponse({ id: data.id, type: "result", success: true, result: [] });
       } else if (data.type === "call_service") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
@@ -925,9 +953,9 @@ wss.on("connection", (ws: WebSocket) => {
               user_id: session.userId ? String(session.userId) : "1"
             }
           }
-        }));
+        });
       } else if (data.type === "get_config") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
@@ -941,11 +969,11 @@ wss.on("connection", (ws: WebSocket) => {
             components: ["api", "websocket", "mobile_app", "device_tracker", "sensor"],
             version: "2026.9.1"
           }
-        }));
+        });
       } else if (data.type === "get_services") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: {} }));
+        sendResponse({ id: data.id, type: "result", success: true, result: {} });
       } else if (data.type === "get_panels") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
@@ -957,30 +985,30 @@ wss.on("connection", (ws: WebSocket) => {
               config: { views: [] }
             }
           }
-        }));
+        });
       } else if (data.type === "frontend/get_translations") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
           result: { resources: {} }
-        }));
+        });
       } else if (data.type === "manifest/list") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
           result: []
-        }));
+        });
       } else if (data.type === "get_states") {
         db = loadDB();
         const userStates = (db.entity_states || []).filter((e: any) => !session.userId || e.user_id === session.userId);
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
           result: userStates
-        }));
+        });
       } else if (data.type === "config/device_registry/list") {
         db = loadDB();
         const devices = (db.devices || [])
@@ -997,7 +1025,7 @@ wss.on("connection", (ws: WebSocket) => {
             disabled_by: null,
             entry_type: null
           }));
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: devices }));
+        sendResponse({ id: data.id, type: "result", success: true, result: devices });
       } else if (data.type === "config/entity_registry/list") {
         db = loadDB();
         const entities = (db.entity_states || [])
@@ -1013,7 +1041,7 @@ wss.on("connection", (ws: WebSocket) => {
             disabled_by: null,
             capabilities: {}
           }));
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: entities }));
+        sendResponse({ id: data.id, type: "result", success: true, result: entities });
       } else if (data.type === "config/entity_registry/list_for_display") {
         db = loadDB();
         const entities = (db.entity_states || [])
@@ -1030,7 +1058,7 @@ wss.on("connection", (ws: WebSocket) => {
             entity_category: null,
             translation_key: null
           }));
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
@@ -1038,9 +1066,21 @@ wss.on("connection", (ws: WebSocket) => {
             entity_categories: {},
             entities
           }
+        });
+      } else if (data.type === "config/floor_registry/list" || data.type === "config/label_registry/list" || data.type === "config/category_registry/list") {
+        sendResponse({ id: data.id, type: "result", success: true, result: [] });
+      } else if (data.type === "config/zone_registry/list") {
+        db = loadDB();
+        const zones = (db.places || []).map((p: any) => ({
+          id: `zone_${p.id}`,
+          name: p.name,
+          latitude: p.latitude,
+          longitude: p.longitude,
+          radius: p.radius || 100,
+          icon: "mdi:map-marker",
+          passive: false
         }));
-      } else if (data.type === "config/floor_registry/list") {
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: [] }));
+        sendResponse({ id: data.id, type: "result", success: true, result: zones });
       } else if (data.type === "config/area_registry/list") {
         db = loadDB();
         const areas = (db.places || []).map((p: any) => ({
@@ -1049,32 +1089,43 @@ wss.on("connection", (ws: WebSocket) => {
           picture: null,
           aliases: []
         }));
-        ws.send(JSON.stringify({ id: data.id, type: "result", success: true, result: areas }));
+        sendResponse({ id: data.id, type: "result", success: true, result: areas });
       } else if (data.type === "frontend/get_user_data") {
-        ws.send(JSON.stringify({
+        sendResponse({
           id: data.id,
           type: "result",
           success: true,
           result: { show_advanced_options: false }
-        }));
+        });
       } else {
-        ws.send(JSON.stringify({
+        console.warn(`[WS DIAGNOSTIC] Unhandled command type received: '${data.type}' (id: ${data.id}, session: ${session.id})`);
+        sendResponse({
           id: data.id,
           type: "result",
           success: false,
           error: { code: "unknown_command", message: `Command '${data.type}' is not supported.` }
-        }));
+        });
       }
     } catch (e) {
       // Ignore invalid JSON
     }
   });
 
-  ws.on("error", () => {
+  ws.on("error", (err) => {
+    const duration = ((Date.now() - session.connectedAt) / 1000).toFixed(2);
+    console.error(`[WS DIAGNOSTIC ERROR] Session ${session.id} error after ${duration}s: ${err.message}`);
     clientSessions.delete(ws);
   });
 
-  ws.on("close", () => {
+  ws.on("close", (code, reason) => {
+    const duration = ((Date.now() - session.connectedAt) / 1000).toFixed(2);
+    const reasonStr = reason ? reason.toString() : "No reason provided";
+    console.log(
+      `[WS DIAGNOSTIC CLOSE] Session ${session.id} closed [user_id=${session.userId}, duration=${duration}s, ` +
+      `close_code=${code}, reason='${reasonStr}', last_rx_type='${session.lastReceivedType}', last_rx_id=${session.lastReceivedId}, ` +
+      `last_tx_type='${session.lastSentType}', last_tx_id=${session.lastSentId}, ` +
+      `event_subs=[${Array.from(session.eventSubs.keys()).join(",")}], entity_subs=[${Array.from(session.entitySubs.keys()).join(",")}]`
+    );
     clientSessions.delete(ws);
   });
 });
@@ -2421,7 +2472,8 @@ app.put("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) =>
 
 app.delete("/api/devices/:entity_id", authenticateToken, (req: AuthRequest, res) => {
   db = loadDB();
-  const entityId = req.params.entity_id;
+  const rawEntityId = req.params.entity_id;
+  const entityId = (Array.isArray(rawEntityId) ? rawEntityId[0] : rawEntityId) as string;
   const userId = req.user!.id;
 
   const dtIndex = db.entity_states.findIndex(
