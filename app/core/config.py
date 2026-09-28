@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     UPLOADS_DIR: str = ""
     DEVICE_OFFLINE_THRESHOLD_MINUTES: int = 15
 
+    # Home Assistant Core Connection (LLAT)
+    HA_URL: str = ""
+    HA_LONG_LIVED_ACCESS_TOKEN: str = ""
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
@@ -62,3 +66,16 @@ if not settings.BASE_URL:
     settings.BASE_URL = os.getenv("APP_URL", "").rstrip("/")
     if not settings.BASE_URL:
         settings.BASE_URL = "http://localhost:3000"
+
+# Post-processing Home Assistant Core connection settings with aliases
+if not settings.HA_URL:
+    settings.HA_URL = (os.getenv("HA_URL", "") or os.getenv("HA_BASE_URL", "")).rstrip("/")
+else:
+    settings.HA_URL = settings.HA_URL.rstrip("/")
+
+if not settings.HA_LONG_LIVED_ACCESS_TOKEN:
+    settings.HA_LONG_LIVED_ACCESS_TOKEN = (
+        os.getenv("HA_LONG_LIVED_ACCESS_TOKEN", "")
+        or os.getenv("HA_TOKEN", "")
+        or os.getenv("HA_ACCESS_TOKEN", "")
+    ).strip()

@@ -27,6 +27,7 @@ class User(Base):
     notify_stop_sharing: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notify_low_battery: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notify_device_offline: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    assigned_entity_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
@@ -205,11 +206,15 @@ class CircleMember(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     circle_id: Mapped[int] = mapped_column(Integer, ForeignKey("circles.id", ondelete="CASCADE"), nullable=False)
-    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    avatar_color: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    profile_picture_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    assigned_entity_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     circle: Mapped["Circle"] = relationship("Circle", back_populates="members")
-    user: Mapped["User"] = relationship("User")
+    user: Mapped[Optional["User"]] = relationship("User")
 
 
 class Place(Base):

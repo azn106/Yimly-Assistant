@@ -871,23 +871,6 @@ export const MapComponent = React.forwardRef<MapComponentHandle, MapComponentPro
     setPingingEntityId(dev.entity_id);
     setDevicePingFeedback(null);
 
-    // Preview mode check for simulated devices
-    const isSimulated = dev.entity_id.includes("simulated") || dev.entity_id.includes("preview");
-
-    if (isSimulated) {
-      // Preview Mode simulated feedback without sending fake HA requests
-      setTimeout(() => {
-        setPingingEntityId(null);
-        setDevicePingFeedback({
-          entityId: dev.entity_id,
-          message: `[Preview] Simulated ping alert triggered for ${dev.device_name || dev.entity_id}`,
-          isError: false
-        });
-        setTimeout(() => setDevicePingFeedback(null), 3500);
-      }, 500);
-      return;
-    }
-
     try {
       const token = localStorage.getItem("access_token") || localStorage.getItem("token") || "";
       const res = await fetch("/api/events/find_my", {

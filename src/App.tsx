@@ -47,9 +47,9 @@ export default function App() {
     }
   });
 
-  // Preview Test Mode State (Development & AI Studio Preview Only)
+  // Preview Test Mode State (Development & AI Studio Preview Only) - Disabled by default to use real data only
   const [testState, setTestState] = useState<PreviewTestState>({
-    enabled: true,
+    enabled: false,
     viewingRole: "owner",
     defaultDeviceId: "device_tracker.sim_iphone"
   });
@@ -288,6 +288,45 @@ export default function App() {
         }
       } catch (extErr) {
         console.warn("[ExternalAuth] Error during external auth exchange:", extErr);
+      }
+    }
+
+    // Detect Home Assistant OAuth redirection callback
+    const haCode = urlParams.get("code");
+    if (haCode) {
+      logWsDiag("HA_OAUTH_CALLBACK_DETECTED", { code: haCode });
+      setStatus("checking");
+      try {
+        const redirectUri = window.location.origin + "/";
+        const callbackRes = await fetch("/api/auth/ha-callback", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            code: haCode,
+            redirect_uri: redirectUri
+          })
+        });
+
+        if (callbackRes.ok) {
+          const authData = await callbackRes.json();
+          localStorage.setItem("access_token", authData.access_token);
+          localStorage.setItem("user_info", JSON.stringify(authData.user));
+          setUser(authData.user);
+          setStatus("authenticated");
+          await fetchCircles(authData.access_token);
+          // Clean code query parameter from the browser URL address bar quietly
+          const cleanedUrl = window.location.origin + window.location.pathname;
+          window.history.replaceState({}, document.title, cleanedUrl);
+          return;
+        } else {
+          const errData = await callbackRes.json();
+          setError(errData.detail || "Authentication with Home Assistant failed.");
+        }
+      } catch (err) {
+        console.error("Error exchanging Home Assistant code:", err);
+        setError("Network error contacting Yimly backend for Home Assistant token exchange.");
       }
     }
 
@@ -964,6 +1003,10 @@ export default function App() {
                   <PeopleTab
                     members={displayMembers}
                     loading={circlesLoading}
+                    circleId={selectedCircle?.id}
+                    onRefreshMembers={() => {
+                      if (selectedCircle) fetchCircleMembers(selectedCircle.id);
+                    }}
                     onSelectMember={(member) => {
                       setActiveTab("map");
                       if (mapComponentRef.current) {
@@ -1176,84 +1219,51 @@ export default function App() {
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.98 }}
                   transition={{ duration: 0.25 }}
-                  className="w-full max-w-md bg-white rounded-3xl shadow-[0_16px_48px_rgba(148,163,184,0.08)] border border-slate-100 p-8 space-y-6"
+                  className="w-full max-w-md bg-white rounded-3xl shadow-[0_16px_48px_rgba(148,163,184,0.08)] border border-slate-100 p-8 space-y-6 text-center"
                 >
-                  <div className="text-center">
-                    <h2 className="text-lg font-bold text-slate-800">Sign in to Yimly Home</h2>
-                    <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
-                      Enter your account credentials to access your family map.
+                  <div className="space-y-2">
+                    <div className="mx-auto w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center shadow-inner">
+                      <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                        <polyline points="9 22 9 12 15 12 15 22" />
+                      </svg>
+                    </div>
+                    <h2 className="text-lg font-bold text-slate-800">Yimly Home Assistant</h2>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      Secure third-party authentication backed by your own smart home instance.
                     </p>
                   </div>
 
                   {error && (
-                    <div className="bg-rose-50 border border-rose-100 text-rose-700 p-3 rounded-2xl flex items-start gap-2 text-xs">
+                    <div className="bg-rose-50 border border-rose-100 text-rose-700 p-3 rounded-2xl flex items-start gap-2 text-xs text-left">
                       <AlertCircle className="h-4.5 w-4.5 shrink-0 mt-0.5 text-rose-500" />
                       <span>{error}</span>
                     </div>
                   )}
 
-                  <form onSubmit={handleLogin} className="space-y-4">
-                    <div>
-                      <label htmlFor="login-username" className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1.5">
-                        Username / Email
-                      </label>
-                      <div className="relative">
-                        <User className="absolute left-3.5 top-3.5 h-4.5 w-4.5 text-slate-400" />
-                        <input
-                          id="login-username"
-                          name="username"
-                          type="text"
-                          required
-                          value={username}
-                          onChange={(e) => setUsername(e.target.value)}
-                          placeholder="e.g. admin"
-                          disabled={loading}
-                          className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-400 transition"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label htmlFor="login-password" className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1.5">
-                        Password
-                      </label>
-                      <div className="relative">
-                        <Lock className="absolute left-3.5 top-3.5 h-4.5 w-4.5 text-slate-400" />
-                        <input
-                          id="login-password"
-                          name="password"
-                          type={showPassword ? "text" : "password"}
-                          required
-                          value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                          placeholder="••••••••"
-                          disabled={loading}
-                          className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-400 transition"
-                        />
-                      </div>
-                    </div>
-
+                  <div className="space-y-4">
                     <button
-                      type="submit"
-                      disabled={loading}
-                      className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3.5 rounded-2xl text-xs uppercase tracking-wider transition shadow-sm"
+                      type="button"
+                      onClick={() => {
+                        setError(null);
+                        const originUrl = window.location.origin;
+                        const clientId = `${originUrl}/`;
+                        const redirectUri = `${originUrl}/`;
+                        const haAuthorizeUrl = `https://home.robinhort.link/auth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code`;
+                        window.location.href = haAuthorizeUrl;
+                      }}
+                      className="w-full bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-bold py-4 px-6 rounded-2xl text-xs uppercase tracking-wider transition-all duration-200 shadow-md flex items-center justify-center gap-2 cursor-pointer hover:shadow-indigo-500/10 hover:scale-[1.01]"
                     >
-                      {loading ? "Signing in..." : "Sign In"}
+                      <svg className="w-4 h-4 fill-current shrink-0" viewBox="0 0 24 24">
+                        <path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2zm0 3.25l7 7V18.5h-2.5v-6h-9v6H5v-6.25l7-7z"/>
+                      </svg>
+                      Sign In with Home Assistant
                     </button>
 
-                    <div className="pt-2 text-center">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setError(null);
-                          setStatus("register");
-                        }}
-                        className="text-xs text-indigo-600 font-bold hover:underline cursor-pointer"
-                      >
-                        Need an account? Register
-                      </button>
+                    <div className="text-[10px] text-slate-400 font-medium leading-normal px-2">
+                      Authentication occurs directly at <code className="text-indigo-600 font-bold">home.robinhort.link</code>. Yimly never accesses or stores your passwords.
                     </div>
-                  </form>
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>

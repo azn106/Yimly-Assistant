@@ -9,6 +9,15 @@ import cors from "cors";
 import multer from "multer";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer as createViteServer } from "vite";
+import dotenv from "dotenv";
+
+// Load environment variables from all standard environment sources
+dotenv.config();
+[".env.local", ".env.production", ".env.development"].forEach((envFile) => {
+  if (fs.existsSync(envFile)) {
+    dotenv.config({ path: envFile, override: true });
+  }
+});
 
 /**
  * ====================================================================================
@@ -52,6 +61,7 @@ export interface UserData {
   notify_stop_sharing?: boolean;
   notify_low_battery?: boolean;
   notify_device_offline?: boolean;
+  assigned_entity_id?: string | null;
   created_at: string;
 }
 
@@ -62,6 +72,7 @@ export function formatUserResponse(u: UserData) {
     display_name: u.display_name,
     avatar_color: u.avatar_color || null,
     profile_picture_url: u.profile_picture_url || null,
+    assigned_entity_id: u.assigned_entity_id || null,
     map_style: u.map_style || "osm",
     map_pin_type: u.map_pin_type || "classic_pin",
     map_selected_icon_size: u.map_selected_icon_size || 72,
@@ -102,9 +113,237 @@ export interface CircleData {
 }
 
 export interface CircleMemberData {
+  id?: number;
   circle_id: number;
-  user_id: number;
+  user_id?: number | null;
+  display_name?: string;
+  avatar_color?: string | null;
+  profile_picture_url?: string | null;
+  assigned_entity_id?: string | null;
+  created_at?: string;
 }
+
+// Server-Side Official Home Assistant Core LLAT Client for Node Backend
+function getRuntimeHaUrl(): string {
+  return (process.env.HA_URL || "").trim().replace(/\/+$/, "");
+}
+
+function getRuntimeHaLlat(): string {
+  return (process.env.HA_LONG_LIVED_ACCESS_TOKEN || "").trim();
+}
+
+export interface DiscoveredHADevice {
+  entity_id: string;
+  device_name: string;
+  state: string;
+  is_available: boolean;
+  latitude: number | null;
+  longitude: number | null;
+  accuracy: number | null;
+  battery: number | null;
+  charging: boolean | null;
+  platform: string;
+  last_updated: string;
+  map_icon: string;
+}
+
+class NodeHAClient {
+  private entities: Map<string, any> = new Map();
+  private ws: WebSocket | null = null;
+  private isConnected: boolean = false;
+  private shouldRun: boolean = false;
+
+  constructor() {
+    if (this.isConfigured()) {
+      this.init();
+    }
+  }
+
+  public isConfigured(): boolean {
+    return Boolean(getRuntimeHaUrl() && getRuntimeHaLlat());
+  }
+
+  public getHaUrl(): string {
+    return getRuntimeHaUrl();
+  }
+
+  private getWsUrl(): string {
+    try {
+      const urlStr = getRuntimeHaUrl();
+      if (!urlStr) return "";
+      const url = new URL(urlStr);
+      const proto = url.protocol === "https:" ? "wss:" : "ws:";
+      return `${proto}//${url.host}/api/websocket`;
+    } catch {
+      return "";
+    }
+  }
+
+  public async init() {
+    if (!this.isConfigured()) return;
+    this.shouldRun = true;
+    await this.fetchStatesRest();
+    this.connectWs();
+  }
+
+  private async fetchStatesRest() {
+    const haUrl = getRuntimeHaUrl();
+    const haLlat = getRuntimeHaLlat();
+    if (!haUrl || !haLlat) return;
+    try {
+      const res = await fetch(`${haUrl}/api/states`, {
+        headers: {
+          Authorization: `Bearer ${haLlat}`,
+          "Content-Type": "application/json"
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          for (const s of data) {
+            if (s && s.entity_id) {
+              this.entities.set(s.entity_id, s);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[Node HA-CLIENT] Initial REST sync warning:", err);
+    }
+  }
+
+  private connectWs() {
+    if (!this.shouldRun || !this.isConfigured()) return;
+    const wsUrl = this.getWsUrl();
+    if (!wsUrl) return;
+
+    try {
+      const ws = new WebSocket(wsUrl);
+      this.ws = ws;
+
+      ws.on("open", () => {
+        // Wait for auth_required
+      });
+
+      ws.on("message", (raw) => {
+        try {
+          const msg = JSON.parse(raw.toString());
+          if (msg.type === "auth_required") {
+            ws.send(JSON.stringify({
+              type: "auth",
+              access_token: getRuntimeHaLlat()
+            }));
+          } else if (msg.type === "auth_ok") {
+            this.isConnected = true;
+            ws.send(JSON.stringify({
+              id: 1,
+              type: "subscribe_events",
+              event_type: "state_changed"
+            }));
+            ws.send(JSON.stringify({
+              id: 2,
+              type: "get_states"
+            }));
+          } else if (msg.type === "result" && msg.success && Array.isArray(msg.result)) {
+            for (const s of msg.result) {
+              if (s && s.entity_id) this.entities.set(s.entity_id, s);
+            }
+          } else if (msg.type === "event" && msg.event?.event_type === "state_changed") {
+            const data = msg.event.data;
+            if (data?.entity_id) {
+              if (data.new_state) {
+                this.entities.set(data.entity_id, data.new_state);
+              } else {
+                this.entities.delete(data.entity_id);
+              }
+              // Broadcast to local connected frontend WebSockets
+              broadcastStateUpdate({
+                event_type: "state_changed",
+                data: data
+              });
+            }
+          }
+        } catch (e) {}
+      });
+
+      ws.on("close", () => {
+        this.isConnected = false;
+        if (this.shouldRun) {
+          setTimeout(() => this.connectWs(), 5000);
+        }
+      });
+
+      ws.on("error", () => {
+        this.isConnected = false;
+      });
+    } catch (err) {
+      if (this.shouldRun) {
+        setTimeout(() => this.connectWs(), 5000);
+      }
+    }
+  }
+
+  public getDiscoveredDevices(): DiscoveredHADevice[] {
+    const list: DiscoveredHADevice[] = [];
+    const nowIso = new Date().toISOString();
+
+    for (const [entityId, stateObj] of this.entities.entries()) {
+      if (!entityId.startsWith("device_tracker.")) {
+        continue;
+      }
+      const attrs = stateObj.attributes || {};
+      const friendlyName = attrs.friendly_name || entityId.split(".")[1].replace(/_/g, " ");
+      const stateVal = String(stateObj.state || "unknown");
+      const isAvailable = !["unavailable", "unknown"].includes(stateVal.toLowerCase());
+      const lat = attrs.latitude != null ? Number(attrs.latitude) : null;
+      const lon = attrs.longitude != null ? Number(attrs.longitude) : null;
+      const battery = attrs.battery_level != null ? Number(attrs.battery_level) : (attrs.battery != null ? Number(attrs.battery) : null);
+      const charging = attrs.battery_charging != null ? Boolean(attrs.battery_charging) : (attrs.charging != null ? Boolean(attrs.charging) : null);
+
+      list.push({
+        entity_id: entityId,
+        device_name: friendlyName,
+        state: stateVal,
+        is_available: isAvailable,
+        latitude: lat,
+        longitude: lon,
+        accuracy: attrs.gps_accuracy != null ? Number(attrs.gps_accuracy) : null,
+        battery: battery,
+        charging: charging,
+        platform: attrs.source_type || "tracker",
+        last_updated: stateObj.last_updated || nowIso,
+        map_icon: entityId.includes("phone") ? "📱 Phone" : "📍 Tracker"
+      });
+    }
+    list.sort((a, b) => (a.is_available === b.is_available ? a.device_name.localeCompare(b.device_name) : a.is_available ? -1 : 1));
+    return list;
+  }
+
+  public getEntityLocation(entityId: string): any | null {
+    if (!entityId || !this.entities.has(entityId)) return null;
+    const stateObj = this.entities.get(entityId);
+    const attrs = stateObj.attributes || {};
+    if (attrs.latitude == null || attrs.longitude == null) return null;
+
+    const friendlyName = attrs.friendly_name || entityId.split(".")[1].replace(/_/g, " ");
+    return {
+      entity_id: entityId,
+      device_name: friendlyName,
+      latitude: Number(attrs.latitude),
+      longitude: Number(attrs.longitude),
+      battery: attrs.battery_level ?? attrs.battery ?? 100,
+      charging: attrs.battery_charging ?? attrs.charging ?? null,
+      accuracy: attrs.gps_accuracy ?? null,
+      state: stateObj.state || "unknown",
+      last_updated: stateObj.last_updated || new Date().toISOString(),
+      map_icon: entityId.includes("phone") ? "📱 Phone" : "📍 Tracker",
+      location_visibility: "family",
+      is_default: true
+    };
+  }
+}
+
+export const nodeHAClient = new NodeHAClient();
 
 export interface EntityStateData {
   entity_id: string;
@@ -189,303 +428,15 @@ export interface YimlyPreviewDatabase {
   devices: any[];
 }
 
-
-// Helper to build deterministic Preview-only historical location points
-function getDeterministicPreviewHistory(): LocationHistoryEntry[] {
-  const now = Date.now();
-  const d = 24 * 3600 * 1000;
-  const h = 3600 * 1000;
-  const m = 60 * 1000;
-
-  return [
-    // User 1 (Admin) - Route around SF (Dolores Park -> Haight -> Golden Gate Park -> Embarcadero)
-    {
-      id: "prev_hist_u1_1",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7749,
-      longitude: -122.4194,
-      accuracy: 5,
-      battery_level: 95,
-      timestamp: new Date(now - 15 * m).toISOString()
-    },
-    {
-      id: "prev_hist_u1_2",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7712,
-      longitude: -122.4215,
-      accuracy: 6,
-      battery_level: 93,
-      timestamp: new Date(now - 45 * m).toISOString()
-    },
-    {
-      id: "prev_hist_u1_3",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7600,
-      longitude: -122.4210,
-      accuracy: 8,
-      battery_level: 90,
-      timestamp: new Date(now - 2 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u1_4",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7680,
-      longitude: -122.4460,
-      accuracy: 7,
-      battery_level: 86,
-      timestamp: new Date(now - 4 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u1_5",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7715,
-      longitude: -122.4680,
-      accuracy: 9,
-      battery_level: 82,
-      timestamp: new Date(now - 7 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u1_6",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7740,
-      longitude: -122.4850,
-      accuracy: 10,
-      battery_level: 78,
-      timestamp: new Date(now - 10 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u1_7",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7955,
-      longitude: -122.3937,
-      accuracy: 6,
-      battery_level: 65,
-      timestamp: new Date(now - 22 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u1_8",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7920,
-      longitude: -122.4040,
-      accuracy: 8,
-      battery_level: 60,
-      timestamp: new Date(now - 24 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u1_9",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.8020,
-      longitude: -122.4480,
-      accuracy: 5,
-      battery_level: 45,
-      timestamp: new Date(now - 2 * d - 2 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u1_10",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.8060,
-      longitude: -122.4200,
-      accuracy: 6,
-      battery_level: 52,
-      timestamp: new Date(now - 3 * d - 4 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u1_11",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7850,
-      longitude: -122.4080,
-      accuracy: 7,
-      battery_level: 68,
-      timestamp: new Date(now - 5 * d - 1 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u1_12",
-      entity_id: "device_tracker.admin_preview_phone",
-      user_id: 1,
-      latitude: 37.7780,
-      longitude: -122.3900,
-      accuracy: 5,
-      battery_level: 75,
-      timestamp: new Date(now - 6 * d - 18 * h).toISOString()
-    },
-
-    // User 2 (Member) - Route around SF (Civic Center -> Union Sq -> Chinatown -> Coit Tower -> Pier 39)
-    {
-      id: "prev_hist_u2_1",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.7833,
-      longitude: -122.4167,
-      accuracy: 6,
-      battery_level: 82,
-      timestamp: new Date(now - 20 * m).toISOString()
-    },
-    {
-      id: "prev_hist_u2_2",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.7875,
-      longitude: -122.4072,
-      accuracy: 8,
-      battery_level: 80,
-      timestamp: new Date(now - 50 * m).toISOString()
-    },
-    {
-      id: "prev_hist_u2_3",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.7950,
-      longitude: -122.4030,
-      accuracy: 10,
-      battery_level: 75,
-      timestamp: new Date(now - 3 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u2_4",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.8010,
-      longitude: -122.4090,
-      accuracy: 7,
-      battery_level: 70,
-      timestamp: new Date(now - 5 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u2_5",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.8085,
-      longitude: -122.4100,
-      accuracy: 5,
-      battery_level: 64,
-      timestamp: new Date(now - 8 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u2_6",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.7760,
-      longitude: -122.4350,
-      accuracy: 9,
-      battery_level: 50,
-      timestamp: new Date(now - 23 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u2_7",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.7700,
-      longitude: -122.4470,
-      accuracy: 8,
-      battery_level: 44,
-      timestamp: new Date(now - 26 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u2_8",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.7650,
-      longitude: -122.4200,
-      accuracy: 7,
-      battery_level: 58,
-      timestamp: new Date(now - 2 * d - 5 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u2_9",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.7800,
-      longitude: -122.4000,
-      accuracy: 6,
-      battery_level: 66,
-      timestamp: new Date(now - 4 * d - 10 * h).toISOString()
-    },
-    {
-      id: "prev_hist_u2_10",
-      entity_id: "device_tracker.member_preview_phone",
-      user_id: 2,
-      latitude: 37.7900,
-      longitude: -122.3950,
-      accuracy: 8,
-      battery_level: 72,
-      timestamp: new Date(now - 6 * d - 12 * h).toISOString()
-    }
-  ];
-}
-
-// Data Store Management (Isolated Preview File Store)
+// Data Store Management (Isolated JSON File Store)
 function loadDB(): YimlyPreviewDatabase {
   if (!fs.existsSync(DATA_FILE)) {
-    const salt = bcrypt.genSaltSync(10);
-    const hash = bcrypt.hashSync("password", salt);
-    
-    // Seed preview-only data for interactive AI Studio testing
     const initialDB: YimlyPreviewDatabase = {
-      users: [
-        {
-          id: 1,
-          username: "admin@yimly.home",
-          password_hash: hash,
-          display_name: "Yimly Admin (Preview)",
-          avatar_color: "#E2D9F3",
-          created_at: new Date().toISOString()
-        },
-        {
-          id: 2,
-          username: "member@yimly.home",
-          password_hash: hash,
-          display_name: "Circle Member (Preview)",
-          avatar_color: "#fbcfe8",
-          created_at: new Date().toISOString()
-        }
-      ],
-      circles: [
-        {
-          id: 1,
-          name: "Yimly Family Circle (Preview)",
-          owner_id: 1,
-          invite_code: "YIMLY-PREVIEW-HQ",
-          created_at: new Date().toISOString()
-        }
-      ],
-      circle_members: [
-        { circle_id: 1, user_id: 1 },
-        { circle_id: 1, user_id: 2 }
-      ],
-      entity_states: [
-        {
-          entity_id: "device_tracker.admin_preview_phone",
-          user_id: 1,
-          domain: "device_tracker",
-          state: "home",
-          attributes: { friendly_name: "Admin's Preview Phone", battery_level: 95, gps_accuracy: 5 },
-          latitude: 37.7749,
-          longitude: -122.4194,
-          last_updated: new Date().toISOString()
-        },
-        {
-          entity_id: "device_tracker.member_preview_phone",
-          user_id: 2,
-          domain: "device_tracker",
-          state: "not_home",
-          attributes: { friendly_name: "Member's Preview Phone", battery_level: 82, gps_accuracy: 10 },
-          latitude: 37.7833,
-          longitude: -122.4167,
-          last_updated: new Date().toISOString()
-        }
-      ],
-      location_history: getDeterministicPreviewHistory(),
+      users: [],
+      circles: [],
+      circle_members: [],
+      entity_states: [],
+      location_history: [],
       places: [],
       alerts: [],
       geofence_states: [],
@@ -499,16 +450,13 @@ function loadDB(): YimlyPreviewDatabase {
   try {
     const raw = fs.readFileSync(DATA_FILE, "utf-8");
     const parsed = JSON.parse(raw);
-    const existingHistory = Array.isArray(parsed.location_history) && parsed.location_history.length > 0
-      ? parsed.location_history
-      : getDeterministicPreviewHistory();
 
     const loaded: YimlyPreviewDatabase = {
       users: parsed.users || [],
       circles: parsed.circles || [],
       circle_members: parsed.circle_members || [],
       entity_states: parsed.entity_states || [],
-      location_history: existingHistory,
+      location_history: parsed.location_history || [],
       places: parsed.places || [],
       alerts: parsed.alerts || [],
       geofence_states: parsed.geofence_states || [],
@@ -517,11 +465,6 @@ function loadDB(): YimlyPreviewDatabase {
       devices: parsed.devices || []
     };
 
-    // If loaded history was empty or upgraded, persist it
-    if (!parsed.location_history || parsed.location_history.length === 0) {
-      saveDB(loaded);
-    }
-
     return loaded;
   } catch (err) {
     return {
@@ -529,7 +472,7 @@ function loadDB(): YimlyPreviewDatabase {
       circles: [],
       circle_members: [],
       entity_states: [],
-      location_history: getDeterministicPreviewHistory(),
+      location_history: [],
       places: [],
       alerts: [],
       geofence_states: [],
@@ -1234,6 +1177,162 @@ app.post("/api/auth/login", (req, res) => {
   });
 });
 
+// Helper to fetch current user info from Home Assistant using a temporary WebSocket connection
+function fetchHaUserWithToken(token: string): Promise<{ id: string; name: string }> {
+  return new Promise((resolve, reject) => {
+    const rawUrl = (process.env.HA_URL || "").trim().replace(/\/+$/, "");
+    if (!rawUrl) {
+      return reject(new Error("HA_URL is not configured on the server"));
+    }
+    const wsUrl = rawUrl.replace(/^http/, "ws") + "/api/websocket";
+    const ws = new WebSocket(wsUrl);
+    let idCounter = 1;
+    let authSent = false;
+
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Timeout waiting for Home Assistant websocket handshake"));
+    }, 8000);
+
+    ws.on("message", (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === "auth_required") {
+          ws.send(JSON.stringify({ type: "auth", access_token: token }));
+          authSent = true;
+        } else if (msg.type === "auth_ok") {
+          ws.send(JSON.stringify({ id: idCounter++, type: "auth/current_user" }));
+        } else if (msg.type === "auth_invalid") {
+          ws.close();
+          reject(new Error("Invalid Home Assistant authentication token"));
+        } else if (msg.type === "result" && msg.success && msg.result && msg.result.id) {
+          clearTimeout(timeout);
+          ws.close();
+          resolve({
+            id: msg.result.id,
+            name: msg.result.name || "Home Assistant User"
+          });
+        }
+      } catch (err) {
+        clearTimeout(timeout);
+        ws.close();
+        reject(err);
+      }
+    });
+
+    ws.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
+
+// Endpoint to exchange Home Assistant IndieAuth code for tokens and log the user in
+app.post("/api/auth/ha-callback", async (req, res) => {
+  const { code, redirect_uri } = req.body;
+  if (!code || !redirect_uri) {
+    return res.status(400).json({ detail: "Authorization code and redirect_uri are required" });
+  }
+
+  const haUrl = (process.env.HA_URL || "").trim().replace(/\/+$/, "");
+  if (!haUrl) {
+    return res.status(500).json({ detail: "HA_URL is not configured on the server" });
+  }
+
+  try {
+    // Exchange IndieAuth authorization code at the real HA /auth/token endpoint
+    const bodyParams = new URLSearchParams();
+    bodyParams.append("grant_type", "authorization_code");
+    bodyParams.append("code", code);
+    bodyParams.append("client_id", redirect_uri); // IndieAuth client_id is typically the redirect origin
+    bodyParams.append("redirect_uri", redirect_uri);
+
+    const tokenResponse = await fetch(`${haUrl}/auth/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: bodyParams.toString()
+    });
+
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      console.error("Home Assistant token exchange failed:", errorText);
+      return res.status(tokenResponse.status).json({ detail: `HA Token Exchange failed: ${errorText}` });
+    }
+
+    const tokenData = await tokenResponse.json() as { access_token: string; refresh_token?: string };
+    const { access_token, refresh_token } = tokenData;
+
+    if (!access_token) {
+      return res.status(400).json({ detail: "No access token returned from Home Assistant" });
+    }
+
+    // Connect to HA websocket to fetch the authenticated user profile details
+    const haUser = await fetchHaUserWithToken(access_token);
+
+    db = loadDB();
+    // Search for existing user matching this Home Assistant ID
+    let foundUser = db.users.find((u: any) => u.ha_user_id === haUser.id);
+
+    if (!foundUser) {
+      // Create new user linked to their Home Assistant identity
+      const nextId = db.users.length > 0 ? Math.max(...db.users.map((u) => u.id)) + 1 : 1;
+      const newUser: UserData = {
+        id: nextId,
+        username: `ha_${haUser.id}`,
+        password_hash: "", // No local password for HA OAuth accounts
+        display_name: haUser.name,
+        ha_user_id: haUser.id,
+        avatar_color: null,
+        map_style: "osm",
+        map_selected_icon_size: 72,
+        map_unselected_icon_size: 64,
+        created_at: new Date().toISOString()
+      } as any;
+
+      db.users.push(newUser);
+
+      // Auto-add new user to first existing family circle, or create one if none exist
+      if (db.circles.length > 0) {
+        db.circle_members.push({ circle_id: db.circles[0].id, user_id: newUser.id });
+      } else {
+        const defaultCircle = {
+          id: 1,
+          name: "Family Circle",
+          owner_id: newUser.id,
+          invite_code: "YIMLY-" + crypto.randomBytes(3).toString("hex").toUpperCase(),
+          created_at: new Date().toISOString()
+        };
+        db.circles.push(defaultCircle);
+        db.circle_members.push({ circle_id: 1, user_id: newUser.id });
+      }
+      foundUser = newUser;
+    }
+
+    const activeUser = foundUser as UserData;
+
+    // Always update token references in database (for persistent tracking or session info)
+    (activeUser as any).ha_access_token = access_token;
+    if (refresh_token) {
+      (activeUser as any).ha_refresh_token = refresh_token;
+    }
+    saveDB(db);
+
+    // Issue standard JWT session token for Yimly app UI
+    const yimlyToken = jwt.sign({ sub: String(activeUser.id) }, JWT_SECRET, { expiresIn: "30d" });
+
+    res.json({
+      access_token: yimlyToken,
+      token_type: "Bearer",
+      user: formatUserResponse(activeUser)
+    });
+  } catch (error: any) {
+    console.error("Error inside /api/auth/ha-callback:", error);
+    res.status(500).json({ detail: error.message || "Internal server error during authentication" });
+  }
+});
+
 app.get("/api/auth/me", authenticateToken, (req: AuthRequest, res) => {
   res.json(formatUserResponse(req.user!));
 });
@@ -1384,7 +1483,7 @@ app.put("/api/auth/profile", authenticateToken, (req: AuthRequest, res) => {
     for (const circleId of userCircles) {
       const circleMembers = db.circle_members.filter((m) => m.circle_id === circleId);
       for (const cm of circleMembers) {
-        if (cm.user_id === req.user!.id) continue;
+        if (!cm.user_id || cm.user_id === req.user!.id) continue;
 
         const recipient = db.users.find((u) => u.id === cm.user_id);
         if (!recipient || recipient.notify_stop_sharing === false) continue;
@@ -1673,75 +1772,309 @@ app.get("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) =
   db = loadDB();
   const currentUserId = req.user!.id;
 
+  const circle = db.circles.find((c) => c.id === circleId);
+  if (!circle) {
+    return res.status(404).json({ detail: "Circle not found" });
+  }
+
   const isMember = db.circle_members.some(
-    (m) => m.circle_id === circleId && m.user_id === currentUserId
+    (m) => m.circle_id === circleId && (m.user_id === currentUserId || circle.owner_id === currentUserId)
   );
 
-  if (!isMember) {
+  if (!isMember && circle.owner_id !== currentUserId) {
     return res.status(403).json({ detail: "Not authorized to view this circle" });
   }
 
-  const memberUserIds = db.circle_members
-    .filter((m) => m.circle_id === circleId)
-    .map((m) => m.user_id);
+  const circleMembers = db.circle_members.filter((m) => m.circle_id === circleId);
 
-  const members = db.users
-    .filter((u) => memberUserIds.includes(u.id))
-    .map((member) => {
-      const isSelf = member.id === currentUserId;
+  const members = circleMembers.map((cm, idx) => {
+    const linkedUser = cm.user_id ? db.users.find((u) => u.id === cm.user_id) : null;
+    const memberId = cm.id || (linkedUser ? linkedUser.id : 1000 + idx);
+    const displayName = cm.display_name || (linkedUser ? linkedUser.display_name : "Family Member");
+    const username = linkedUser ? linkedUser.username : `member_${memberId}`;
+    const avatarColor = cm.avatar_color || (linkedUser ? linkedUser.avatar_color : null);
+    const profilePictureUrl = cm.profile_picture_url || (linkedUser ? linkedUser.profile_picture_url : null);
+    const assignedEntityId = cm.assigned_entity_id || (linkedUser ? linkedUser.assigned_entity_id : null);
+    const isSelf = linkedUser && linkedUser.id === currentUserId;
+    const isOwner = Boolean(circle.owner_id === (linkedUser ? linkedUser.id : null));
 
-      // If user disabled location sharing and viewer is another member, hide devices
-      if (member.share_location === false && !isSelf) {
-        return {
-          id: member.id,
-          username: member.username,
-          display_name: member.display_name,
-          avatar_color: member.avatar_color || null,
-          profile_picture_url: member.profile_picture_url || null,
-          devices: []
-        };
+    // Privacy check: if linked user disabled location sharing and viewer is another member, hide devices
+    if (linkedUser && linkedUser.share_location === false && !isSelf) {
+      return {
+        id: memberId,
+        username,
+        display_name: displayName,
+        avatar_color: avatarColor,
+        profile_picture_url: profilePictureUrl,
+        assigned_entity_id: assignedEntityId,
+        is_owner: isOwner,
+        devices: []
+      };
+    }
+
+    const devices: any[] = [];
+
+    // 1. Check if assigned HA entity exists
+    if (assignedEntityId) {
+      if (nodeHAClient.isConfigured()) {
+        const haLoc = nodeHAClient.getEntityLocation(assignedEntityId);
+        if (haLoc) devices.push(haLoc);
+      } else {
+        // Look in local entity states
+        const localEntity = db.entity_states.find((e) => e.entity_id === assignedEntityId);
+        if (localEntity && localEntity.latitude != null && localEntity.longitude != null) {
+          devices.push({
+            entity_id: localEntity.entity_id,
+            device_name: localEntity.attributes?.friendly_name || localEntity.entity_id,
+            latitude: localEntity.latitude,
+            longitude: localEntity.longitude,
+            battery: localEntity.attributes?.battery_level ?? 100,
+            accuracy: localEntity.attributes?.gps_accuracy ?? 0,
+            state: localEntity.state || "unknown",
+            last_updated: localEntity.last_updated,
+            platform: localEntity.attributes?.platform || "tracker",
+            location_visibility: localEntity.attributes?.location_visibility || "family",
+            map_icon: localEntity.attributes?.map_icon || "📱 Phone",
+            allow_find_my_device: true,
+            is_default: true
+          });
+        }
       }
-
-      // Find real device tracker telemetry sent for this user
+    } else if (linkedUser) {
+      // Fallback to local entity_states for this user
       const userTrackers = db.entity_states.filter(
-        (e) => e.user_id === member.id && e.domain === "device_tracker"
+        (e) => e.user_id === linkedUser.id && e.domain === "device_tracker" && e.latitude != null && e.longitude != null
       );
-
-      // Filter by location_visibility: "me_only" devices are hidden from other circle members
-      const visibleTrackers = userTrackers.filter((dt) => {
-        if (isSelf) return true;
-        const vis = dt.attributes?.location_visibility || "family";
-        return vis !== "me_only";
-      });
-
-      // Extract valid real locations
-      const devices = visibleTrackers
-        .filter((dt) => dt.latitude != null && dt.longitude != null)
-        .map((dt) => ({
+      const visible = userTrackers.filter((dt) => isSelf || (dt.attributes?.location_visibility || "family") !== "me_only");
+      for (const dt of visible) {
+        devices.push({
           entity_id: dt.entity_id,
           device_name: dt.attributes?.friendly_name || dt.entity_id,
           latitude: dt.latitude!,
           longitude: dt.longitude!,
           battery: dt.attributes?.battery_level ?? 100,
           accuracy: dt.attributes?.gps_accuracy ?? 0,
+          state: dt.state || "unknown",
           last_updated: dt.last_updated,
-          platform: dt.attributes?.platform || "Android",
+          platform: dt.attributes?.platform || "tracker",
           location_visibility: dt.attributes?.location_visibility || "family",
-          map_icon: dt.attributes?.map_icon || "Phone",
-          allow_find_my_device: dt.attributes?.allow_find_my_device !== false
-        }));
+          map_icon: dt.attributes?.map_icon || "📱 Phone",
+          allow_find_my_device: true,
+          is_default: devices.length === 0
+        });
+      }
+    }
 
-      return {
-        id: member.id,
-        username: member.username,
-        display_name: member.display_name,
-        avatar_color: member.avatar_color || null,
-        profile_picture_url: member.profile_picture_url || null,
-        devices
-      };
-    });
+    return {
+      id: memberId,
+      username,
+      display_name: displayName,
+      avatar_color: avatarColor,
+      profile_picture_url: profilePictureUrl,
+      assigned_entity_id: assignedEntityId,
+      is_owner: isOwner,
+      devices
+    };
+  });
 
   res.json(members);
+});
+
+// Member Management API: Create Yimly family member in Circle
+app.post("/api/circles/:id/members", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.id);
+  db = loadDB();
+  const circle = db.circles.find((c) => c.id === circleId);
+  if (!circle) {
+    return res.status(404).json({ detail: "Circle not found" });
+  }
+
+  const { display_name, avatar_color, profile_picture_url, assigned_entity_id } = req.body || {};
+  if (!display_name || !String(display_name).trim()) {
+    return res.status(422).json({ detail: "Display name is required" });
+  }
+
+  const newMemberId = Date.now() + Math.floor(Math.random() * 1000);
+  const newMember: CircleMemberData = {
+    id: newMemberId,
+    circle_id: circleId,
+    user_id: null,
+    display_name: String(display_name).trim(),
+    avatar_color: avatar_color || "#FF9AA2",
+    profile_picture_url: profile_picture_url || null,
+    assigned_entity_id: assigned_entity_id ? String(assigned_entity_id).trim() : null,
+    created_at: new Date().toISOString()
+  };
+
+  db.circle_members = db.circle_members || [];
+  db.circle_members.push(newMember);
+  saveDB(db);
+
+  const devices: any[] = [];
+  if (newMember.assigned_entity_id) {
+    if (nodeHAClient.isConfigured()) {
+      const loc = nodeHAClient.getEntityLocation(newMember.assigned_entity_id);
+      if (loc) devices.push(loc);
+    } else {
+      const localEntity = db.entity_states.find((e) => e.entity_id === newMember.assigned_entity_id);
+      if (localEntity && localEntity.latitude != null && localEntity.longitude != null) {
+        devices.push({
+          entity_id: localEntity.entity_id,
+          device_name: localEntity.attributes?.friendly_name || localEntity.entity_id,
+          latitude: localEntity.latitude,
+          longitude: localEntity.longitude,
+          battery: localEntity.attributes?.battery_level ?? 100,
+          accuracy: localEntity.attributes?.gps_accuracy ?? 0,
+          last_updated: localEntity.last_updated,
+          map_icon: "📱 Phone",
+          is_default: true
+        });
+      }
+    }
+  }
+
+  res.status(201).json({
+    id: newMember.id,
+    username: `member_${newMember.id}`,
+    display_name: newMember.display_name,
+    avatar_color: newMember.avatar_color,
+    profile_picture_url: newMember.profile_picture_url,
+    assigned_entity_id: newMember.assigned_entity_id,
+    is_owner: false,
+    devices
+  });
+});
+
+// Member Management API: Update Yimly family member (edit name, color, avatar, assign/change/remove HA device)
+app.put("/api/circles/:id/members/:memberId", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.id);
+  const memberId = Number(req.params.memberId);
+  db = loadDB();
+
+  let memberIndex = db.circle_members.findIndex(
+    (cm) => cm.circle_id === circleId && (cm.id === memberId || cm.user_id === memberId)
+  );
+
+  if (memberIndex === -1) {
+    return res.status(404).json({ detail: "Member not found" });
+  }
+
+  const { display_name, avatar_color, profile_picture_url, assigned_entity_id } = req.body || {};
+  const cm = db.circle_members[memberIndex];
+
+  if (display_name !== undefined && String(display_name).trim()) {
+    cm.display_name = String(display_name).trim();
+  }
+  if (avatar_color !== undefined) {
+    cm.avatar_color = avatar_color;
+  }
+  if (profile_picture_url !== undefined) {
+    cm.profile_picture_url = profile_picture_url;
+  }
+  if (assigned_entity_id !== undefined) {
+    cm.assigned_entity_id = assigned_entity_id ? String(assigned_entity_id).trim() : null;
+  }
+
+  // If this member is linked to a user, sync user record
+  if (cm.user_id) {
+    const userIdx = db.users.findIndex((u) => u.id === cm.user_id);
+    if (userIdx !== -1) {
+      if (cm.display_name) db.users[userIdx].display_name = cm.display_name;
+      if (cm.avatar_color) db.users[userIdx].avatar_color = cm.avatar_color;
+      if (cm.assigned_entity_id !== undefined) db.users[userIdx].assigned_entity_id = cm.assigned_entity_id;
+    }
+  }
+
+  saveDB(db);
+
+  const devices: any[] = [];
+  if (cm.assigned_entity_id) {
+    if (nodeHAClient.isConfigured()) {
+      const loc = nodeHAClient.getEntityLocation(cm.assigned_entity_id);
+      if (loc) devices.push(loc);
+    } else {
+      const localEntity = db.entity_states.find((e) => e.entity_id === cm.assigned_entity_id);
+      if (localEntity && localEntity.latitude != null && localEntity.longitude != null) {
+        devices.push({
+          entity_id: localEntity.entity_id,
+          device_name: localEntity.attributes?.friendly_name || localEntity.entity_id,
+          latitude: localEntity.latitude,
+          longitude: localEntity.longitude,
+          battery: localEntity.attributes?.battery_level ?? 100,
+          accuracy: localEntity.attributes?.gps_accuracy ?? 0,
+          last_updated: localEntity.last_updated,
+          map_icon: "📱 Phone",
+          is_default: true
+        });
+      }
+    }
+  }
+
+  res.json({
+    id: cm.id || memberId,
+    username: cm.user_id ? (db.users.find((u) => u.id === cm.user_id)?.username || `member_${memberId}`) : `member_${memberId}`,
+    display_name: cm.display_name || "Family Member",
+    avatar_color: cm.avatar_color,
+    profile_picture_url: cm.profile_picture_url,
+    assigned_entity_id: cm.assigned_entity_id,
+    is_owner: false,
+    devices
+  });
+});
+
+// Member Management API: Delete Yimly family member from Circle
+app.delete("/api/circles/:id/members/:memberId", authenticateToken, (req: AuthRequest, res) => {
+  const circleId = Number(req.params.id);
+  const memberId = Number(req.params.memberId);
+  db = loadDB();
+
+  const circle = db.circles.find((c) => c.id === circleId);
+  const memberIndex = db.circle_members.findIndex(
+    (cm) => cm.circle_id === circleId && (cm.id === memberId || cm.user_id === memberId)
+  );
+
+  if (memberIndex === -1) {
+    return res.status(404).json({ detail: "Member not found" });
+  }
+
+  const cm = db.circle_members[memberIndex];
+  if (circle && cm.user_id === circle.owner_id) {
+    return res.status(400).json({ detail: "Cannot delete the Circle owner. Delete the Circle instead." });
+  }
+
+  db.circle_members.splice(memberIndex, 1);
+  saveDB(db);
+
+  res.json({ success: true, message: "Member removed from circle" });
+});
+
+// Discovered Home Assistant Devices Inventory Endpoint
+app.get(["/api/ha/devices", "/api/devices/available"], authenticateToken, (req: AuthRequest, res) => {
+  db = loadDB();
+  if (nodeHAClient.isConfigured()) {
+    const discovered = nodeHAClient.getDiscoveredDevices();
+    return res.json(discovered);
+  }
+
+  // Fallback to local discovered entities in dev/preview
+  const localEntities = db.entity_states.filter(
+    (e) => e.domain === "device_tracker" || e.entity_id.startsWith("device_tracker.")
+  );
+  const list = localEntities.map((e) => ({
+    entity_id: e.entity_id,
+    device_name: e.attributes?.friendly_name || e.entity_id,
+    state: e.state || "home",
+    is_available: true,
+    latitude: e.latitude ?? null,
+    longitude: e.longitude ?? null,
+    accuracy: e.attributes?.gps_accuracy ?? null,
+    battery: e.attributes?.battery_level ?? 100,
+    charging: e.attributes?.charging ?? null,
+    platform: e.attributes?.platform || "Android",
+    last_updated: e.last_updated || new Date().toISOString(),
+    map_icon: e.attributes?.map_icon || "📱 Phone"
+  }));
+  res.json(list);
 });
 
 // Places API Endpoints
@@ -2005,34 +2338,9 @@ app.put("/api/circles/:circleId/alerts/:alertId/read", authenticateToken, (req: 
 app.get("/api/devices", authenticateToken, (req: AuthRequest, res) => {
   db = loadDB();
   const userId = req.user!.id;
-  let userTrackers = db.entity_states.filter(
+  const userTrackers = db.entity_states.filter(
     (e) => e.user_id === userId && e.domain === "device_tracker"
   );
-
-  // If user has no devices yet, provision primary device tracker
-  if (userTrackers.length === 0) {
-    const primaryDevice: EntityStateData = {
-      entity_id: `device_tracker.user_${userId}_phone`,
-      user_id: userId,
-      domain: "device_tracker",
-      state: "home",
-      attributes: {
-        friendly_name: `${req.user!.display_name}'s Phone`,
-        battery_level: 95,
-        gps_accuracy: 5,
-        platform: "Android",
-        location_visibility: "family",
-        map_icon: "Phone",
-        allow_find_my_device: true
-      },
-      latitude: 37.7749,
-      longitude: -122.4194,
-      last_updated: new Date().toISOString()
-    };
-    db.entity_states.push(primaryDevice);
-    saveDB(db);
-    userTrackers = [primaryDevice];
-  }
 
   const result = userTrackers.map((dt) => ({
     entity_id: dt.entity_id,
@@ -2309,8 +2617,8 @@ function evaluateGeofencingPreview(userId: number, entityId: string, lat: number
         console.log(`[Geofence Debug] circleMembers:`, circleMembers.map(m => m.user_id));
 
         for (const cm of circleMembers) {
-          // Skip sender
-          if (cm.user_id === userId) continue;
+          // Skip sender or non-user members
+          if (!cm.user_id || cm.user_id === userId) continue;
 
           // Check recipient user's notification preferences
           const recipient = db.users.find((u) => u.id === cm.user_id);
@@ -2400,7 +2708,7 @@ function evaluateLowBatteryPreview(userId: number, entityId: string, battery: nu
     for (const circleId of userCircles) {
       const circleMembers = db.circle_members.filter((m) => m.circle_id === circleId);
       for (const cm of circleMembers) {
-        if (cm.user_id === userId) continue;
+        if (!cm.user_id || cm.user_id === userId) continue;
 
         const recipient = db.users.find((u) => u.id === cm.user_id);
         if (!recipient || recipient.notify_low_battery === false) continue;
@@ -2482,7 +2790,7 @@ function checkOfflineDevicesPreview(): void {
       for (const circleId of userCircles) {
         const circleMembers = db.circle_members.filter((m) => m.circle_id === circleId);
         for (const cm of circleMembers) {
-          if (cm.user_id === userId) continue;
+          if (!cm.user_id || cm.user_id === userId) continue;
 
           const recipient = db.users.find((u) => u.id === cm.user_id);
           if (!recipient || recipient.notify_device_offline === false) continue;

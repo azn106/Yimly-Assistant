@@ -50,15 +50,17 @@ async function makeRequest(
 async function runTests() {
   console.log("Starting Places API test suite...");
 
-  // 1. Login user 1
-  const login1 = await makeRequest("POST", "/api/auth/login", {
-    username: "admin@yimly.home",
-    password: "password"
+  // 1. Register and Authenticate user 1
+  const user1Name = `place_admin_${Date.now()}`;
+  const reg1 = await makeRequest("POST", "/api/auth/register", {
+    username: user1Name,
+    password: "password123",
+    display_name: "Place Admin"
   });
-  if (login1.status !== 200) {
-    throw new Error(`Login failed for user 1: ${JSON.stringify(login1.data)}`);
+  if (reg1.status !== 200) {
+    throw new Error(`Register failed for user 1: ${JSON.stringify(reg1.data)}`);
   }
-  const token1 = login1.data.access_token;
+  const token1 = reg1.data.access_token;
   console.log("✓ User 1 authenticated successfully");
 
   // 2. Register user 2

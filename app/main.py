@@ -144,6 +144,26 @@ async def on_startup() -> None:
             except Exception:
                 pass
 
+            # Dynamically migrate users.assigned_entity_id
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN assigned_entity_id VARCHAR(255);"))
+                logger.info("Database migration: Added assigned_entity_id column to users table.")
+            except Exception:
+                pass
+
+            # Dynamically migrate circle_members custom member columns
+            for member_col, col_type in [
+                ("display_name", "VARCHAR(255)"),
+                ("avatar_color", "VARCHAR(50)"),
+                ("profile_picture_url", "VARCHAR(500)"),
+                ("assigned_entity_id", "VARCHAR(255)")
+            ]:
+                try:
+                    await conn.execute(text(f"ALTER TABLE circle_members ADD COLUMN {member_col} {col_type};"))
+                    logger.info(f"Database migration: Added {member_col} column to circle_members table.")
+                except Exception:
+                    pass
+
             # Dynamically migrate sensor_registrations table if legacy schema without 'id' column exists
             try:
                 table_info = await conn.execute(text("PRAGMA table_info(sensor_registrations);"))
@@ -201,6 +221,23 @@ async def on_startup() -> None:
                 await asyncio.sleep(5) # Check frequently
 
         asyncio.create_task(run_offline_checker())
+
+        # Start official Home Assistant Core integration if configured
+        from app.services.ha_client import ha_client
+        if ha_client.is_configured():
+            logger.info("Starting Home Assistant Core client (LLAT authentication)...")
+            await ha_client.start()
+
+            # Wire HA state changes to notify connected WebSocket sessions
+            from app.services.event_service import EventService
+            def on_ha_state_changed(entity_id: str, old_state: any, new_state: any):
+                if new_state:
+                    EventService.dispatch_event_sync("state_changed", {
+                        "entity_id": entity_id,
+                        "old_state": old_state,
+                        "new_state": new_state
+                    })
+            ha_client.subscribe_state_changes(on_ha_state_changed)
 
     except Exception as e:
         logger.critical(f"Database schema initialization failed: {e}")

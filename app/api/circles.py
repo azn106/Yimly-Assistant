@@ -1,6 +1,6 @@
 import uuid
 import logging
-from typing import List
+from typing import List, Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, delete
@@ -9,7 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_authenticated_user
 from app.db.database import get_db
 from app.db.models import User, Circle, CircleMember, EntityState
-from app.schemas.circles import CircleCreate, CircleJoin, CircleResponse, MemberResponse, MemberDeviceLocation
+from app.schemas.circles import (
+    CircleCreate, CircleJoin, CircleResponse, MemberResponse, MemberDeviceLocation,
+    MemberCreate, MemberUpdate, HADeviceResponse
+)
+from app.services.ha_client import ha_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/circles", tags=["Circles"])
@@ -46,7 +50,11 @@ async def create_circle(
     # Automatically add owner as a member
     member = CircleMember(
         circle_id=new_circle.id,
-        user_id=user.id
+        user_id=user.id,
+        display_name=user.display_name,
+        avatar_color=user.avatar_color,
+        profile_picture_url=user.profile_picture_url,
+        assigned_entity_id=getattr(user, "assigned_entity_id", None)
     )
     db.add(member)
     await db.commit()
@@ -81,7 +89,11 @@ async def join_circle(
 
     new_member = CircleMember(
         circle_id=circle.id,
-        user_id=user.id
+        user_id=user.id,
+        display_name=user.display_name,
+        avatar_color=user.avatar_color,
+        profile_picture_url=user.profile_picture_url,
+        assigned_entity_id=getattr(user, "assigned_entity_id", None)
     )
     db.add(new_member)
     await db.commit()
@@ -98,62 +110,43 @@ async def leave_circle(
     stmt_circle = select(Circle).where(Circle.id == circle_id)
     res_circle = await db.execute(stmt_circle)
     circle = res_circle.scalar_one_or_none()
-
     if not circle:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Circle not found."
         )
 
-    # Verify user is actually a member of this circle
+    if circle.owner_id == user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Circle owner cannot leave the circle. Delete the circle instead."
+        )
+
     stmt_member = select(CircleMember).where(
         CircleMember.circle_id == circle_id,
         CircleMember.user_id == user.id
     )
     res_member = await db.execute(stmt_member)
-    membership = res_member.scalar_one_or_none()
-
-    if not membership:
+    member = res_member.scalar_one_or_none()
+    if not member:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="You are not a member of this circle."
         )
 
-    circle_name = circle.name
-
-    # Remove ONLY the authenticated user's membership
-    await db.delete(membership)
+    await db.delete(member)
     await db.commit()
-
-    # Check remaining members in the circle
-    stmt_remaining = select(CircleMember).where(CircleMember.circle_id == circle_id)
-    res_remaining = await db.execute(stmt_remaining)
-    remaining_members = res_remaining.scalars().all()
-
-    if len(remaining_members) == 0:
-        # If removing the user leaves 0 members, cleanly delete the empty circle
-        await db.delete(circle)
-        await db.commit()
-    else:
-        # If the departing user was the recorded owner_id, reassign to a remaining member
-        # to ensure referential integrity with users table
-        if circle.owner_id == user.id:
-            circle.owner_id = remaining_members[0].user_id
-            await db.commit()
-
-    return {"success": True, "message": f"Successfully left {circle_name}."}
+    return {"status": "success", "message": "Successfully left the circle."}
 
 @router.delete("/{circle_id}")
-@router.post("/{circle_id}/delete")
 async def delete_circle(
     circle_id: int,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_authenticated_user)
 ):
-    # Verify circle exists
-    stmt_circle = select(Circle).where(Circle.id == circle_id)
-    res_circle = await db.execute(stmt_circle)
-    circle = res_circle.scalar_one_or_none()
+    stmt = select(Circle).where(Circle.id == circle_id)
+    res = await db.execute(stmt)
+    circle = res.scalar_one_or_none()
 
     if not circle:
         raise HTTPException(
@@ -161,31 +154,18 @@ async def delete_circle(
             detail="Circle not found."
         )
 
-    # Verify user is actually a member of this circle
-    stmt_member = select(CircleMember).where(
-        CircleMember.circle_id == circle_id,
-        CircleMember.user_id == user.id
-    )
-    res_member = await db.execute(stmt_member)
-    membership = res_member.scalar_one_or_none()
-
-    if not membership:
+    if circle.owner_id != user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not authorized to delete this Circle."
+            detail="Only the circle creator / owner can delete this Circle."
         )
 
     circle_name = circle.name
-
-    # Remove all CircleMember records belonging to that circle
-    await db.execute(delete(CircleMember).where(CircleMember.circle_id == circle_id))
-
-    # Delete the Circle itself cleanly
     await db.delete(circle)
     await db.commit()
 
     return {
-        "success": True,
+        "status": "success",
         "message": f'Family Circle "{circle_name}" has been deleted.'
     }
 
@@ -194,8 +174,13 @@ async def list_circles(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_authenticated_user)
 ):
-    # Retrieve all circles where user is a member
-    stmt = select(Circle).join(CircleMember).where(CircleMember.user_id == user.id)
+    # Retrieve all circles where user is a member or owner
+    stmt = (
+        select(Circle)
+        .outerjoin(CircleMember, CircleMember.circle_id == Circle.id)
+        .where((CircleMember.user_id == user.id) | (Circle.owner_id == user.id))
+        .distinct()
+    )
     result = await db.execute(stmt)
     return list(result.scalars().all())
 
@@ -205,83 +190,109 @@ async def list_circle_members(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_authenticated_user)
 ):
-    # Verify current user is a member of this circle
+    # Verify current user is authorized to view this circle (member or owner)
+    stmt_circle = select(Circle).where(Circle.id == circle_id)
+    res_circle = await db.execute(stmt_circle)
+    circle = res_circle.scalar_one_or_none()
+    if not circle:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Circle not found.")
+
     stmt_check = select(CircleMember).where(
         CircleMember.circle_id == circle_id,
         CircleMember.user_id == user.id
     )
     res_check = await db.execute(stmt_check)
-    if not res_check.scalar_one_or_none():
+    if not res_check.scalar_one_or_none() and circle.owner_id != user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not authorized to view this Circle."
         )
 
     # Query all members of the circle
-    stmt_members = select(User).join(CircleMember).where(CircleMember.circle_id == circle_id)
+    stmt_members = select(CircleMember).where(CircleMember.circle_id == circle_id)
     res_members = await db.execute(stmt_members)
-    members_list = res_members.scalars().all()
+    circle_members = res_members.scalars().all()
 
-    response = []
-    for member in members_list:
-        # Look up all "device_tracker" entities belonging to this member to fetch real locations
-        stmt_states = select(EntityState).where(
-            EntityState.user_id == member.id,
-            EntityState.domain == "device_tracker"
-        )
-        res_states = await db.execute(stmt_states)
-        device_trackers = res_states.scalars().all()
+    # Pre-fetch users for linked user_ids
+    user_ids = [cm.user_id for cm in circle_members if cm.user_id]
+    users_by_id = {}
+    if user_ids:
+        stmt_u = select(User).where(User.id.in_(user_ids))
+        res_u = await db.execute(stmt_u)
+        for u in res_u.scalars().all():
+            users_by_id[u.id] = u
 
-        devices_loc = []
-        for idx, dt in enumerate(device_trackers):
-            # ONLY include devices with valid, non-None real location coordinates
-            if dt.latitude is not None and dt.longitude is not None:
-                attrs = dt.attributes if isinstance(dt.attributes, dict) else {}
-                friendly_name = attrs.get("friendly_name") or dt.entity_id
-                battery_val = attrs.get("battery")
-                if battery_val is None:
-                    battery_val = attrs.get("battery_level")
-                if battery_val is None:
-                    battery_val = attrs.get("battery_bar")
-                battery = battery_val
-                accuracy = attrs.get("gps_accuracy")
-                map_icon = attrs.get("map_icon") or "📱 Phone"
-                loc_vis = attrs.get("location_visibility") or "family"
-                is_def = bool(attrs.get("is_default", False))
-                
-                if dt.last_updated:
-                    last_updated_str = dt.last_updated.isoformat() if hasattr(dt.last_updated, "isoformat") else str(dt.last_updated)
-                else:
-                    last_updated_str = datetime.now(timezone.utc).isoformat()
+    response: List[MemberResponse] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-                devices_loc.append(MemberDeviceLocation(
-                    entity_id=dt.entity_id,
-                    device_name=friendly_name,
-                    latitude=dt.latitude,
-                    longitude=dt.longitude,
-                    battery=battery,
-                    charging=attrs.get("charging"),
-                    accuracy=accuracy,
-                    last_updated=last_updated_str,
-                    map_icon=map_icon,
-                    location_visibility=loc_vis,
-                    is_default=is_def
-                ))
+    for cm in circle_members:
+        linked_user = users_by_id.get(cm.user_id) if cm.user_id else None
+        
+        display_name = cm.display_name or (linked_user.display_name if linked_user else "Family Member")
+        username = (linked_user.username if linked_user else f"member_{cm.id}")
+        avatar_color = cm.avatar_color or (linked_user.avatar_color if linked_user else None)
+        profile_picture_url = cm.profile_picture_url or (linked_user.profile_picture_url if linked_user else None)
+        assigned_entity_id = cm.assigned_entity_id or (getattr(linked_user, "assigned_entity_id", None) if linked_user else None)
+        is_owner = bool(circle.owner_id == (linked_user.id if linked_user else None))
 
-        # Ensure default device comes first at index 0
+        devices_loc: List[MemberDeviceLocation] = []
+
+        # 1. Official Home Assistant Core telemetry via LLAT
+        if ha_client.is_configured():
+            devices_loc = ha_client.get_member_locations(
+                member_username=username,
+                member_display_name=display_name,
+                assigned_entity_id=assigned_entity_id
+            )
+
+        # 2. Fallback to local EntityState records if HA Core returned no location and linked user exists
+        if not devices_loc and linked_user:
+            stmt_states = select(EntityState).where(
+                EntityState.user_id == linked_user.id,
+                EntityState.domain == "device_tracker"
+            )
+            res_states = await db.execute(stmt_states)
+            device_trackers = res_states.scalars().all()
+
+            for dt in device_trackers:
+                if dt.latitude is not None and dt.longitude is not None:
+                    attrs = dt.attributes if isinstance(dt.attributes, dict) else {}
+                    friendly_name = attrs.get("friendly_name") or dt.entity_id
+                    battery_val = attrs.get("battery")
+                    if battery_val is None:
+                        battery_val = attrs.get("battery_level")
+                    if battery_val is None:
+                        battery_val = attrs.get("battery_bar")
+                    accuracy = attrs.get("gps_accuracy")
+                    map_icon = attrs.get("map_icon") or "📱 Phone"
+                    loc_vis = attrs.get("location_visibility") or "family"
+                    is_def = bool(attrs.get("is_default", False))
+                    
+                    last_updated_str = dt.last_updated.isoformat() if hasattr(dt.last_updated, "isoformat") else str(dt.last_updated) if dt.last_updated else now_iso
+
+                    devices_loc.append(MemberDeviceLocation(
+                        entity_id=dt.entity_id,
+                        device_name=friendly_name,
+                        latitude=dt.latitude,
+                        longitude=dt.longitude,
+                        battery=battery_val,
+                        charging=attrs.get("charging"),
+                        accuracy=accuracy,
+                        last_updated=last_updated_str,
+                        map_icon=map_icon,
+                        location_visibility=loc_vis,
+                        is_default=is_def
+                    ))
+
+        # Sort: default device first
         has_explicit_default = any(d.is_default for d in devices_loc)
         if not has_explicit_default and len(devices_loc) > 0:
             devices_loc[0].is_default = True
-
         devices_loc.sort(key=lambda d: 0 if d.is_default else 1)
 
-        # STRICT PRIVACY ENFORCEMENT:
-        # Other circle members receive ONLY the single default shared device location,
-        # UNLESS the member has disabled location sharing (share_location is False),
-        # in which case no devices or location coordinates are exposed to other members.
-        # The requesting user receives all their own devices (default at [0], private non-defaults at [1..N]).
-        if member.id != user.id:
-            if getattr(member, "share_location", True) is False:
+        # Privacy check
+        if linked_user and linked_user.id != user.id:
+            if getattr(linked_user, "share_location", True) is False:
                 filtered_devices = []
             else:
                 filtered_devices = devices_loc[:1] if len(devices_loc) > 0 else []
@@ -289,12 +300,162 @@ async def list_circle_members(
             filtered_devices = devices_loc
 
         response.append(MemberResponse(
-            id=member.id,
-            username=member.username,
-            display_name=member.display_name,
-            avatar_color=member.avatar_color,
-            profile_picture_url=member.profile_picture_url,
+            id=cm.id,
+            username=username,
+            display_name=display_name,
+            avatar_color=avatar_color,
+            profile_picture_url=profile_picture_url,
+            assigned_entity_id=assigned_entity_id,
+            is_owner=is_owner,
             devices=filtered_devices
         ))
 
     return response
+
+@router.post("/{circle_id}/members", response_model=MemberResponse)
+async def create_circle_member(
+    circle_id: int,
+    member_in: MemberCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_authenticated_user)
+):
+    """
+    Creates a new independent Yimly family member profile within the Circle,
+    with an optional assigned Home Assistant device_tracker entity.
+    """
+    # Verify circle exists and user has access
+    stmt_circle = select(Circle).where(Circle.id == circle_id)
+    res_circle = await db.execute(stmt_circle)
+    circle = res_circle.scalar_one_or_none()
+    if not circle:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Circle not found.")
+
+    new_member = CircleMember(
+        circle_id=circle_id,
+        user_id=None,
+        display_name=member_in.display_name.strip(),
+        avatar_color=member_in.avatar_color,
+        profile_picture_url=member_in.profile_picture_url,
+        assigned_entity_id=member_in.assigned_entity_id.strip() if member_in.assigned_entity_id else None
+    )
+    db.add(new_member)
+    await db.commit()
+    await db.refresh(new_member)
+
+    # Resolve live device location if assigned
+    devices_loc: List[MemberDeviceLocation] = []
+    if new_member.assigned_entity_id and ha_client.is_configured():
+        loc = ha_client.get_entity_location(new_member.assigned_entity_id)
+        if loc:
+            devices_loc.append(loc)
+
+    return MemberResponse(
+        id=new_member.id,
+        username=f"member_{new_member.id}",
+        display_name=new_member.display_name or "Family Member",
+        avatar_color=new_member.avatar_color,
+        profile_picture_url=new_member.profile_picture_url,
+        assigned_entity_id=new_member.assigned_entity_id,
+        is_owner=False,
+        devices=devices_loc
+    )
+
+@router.put("/{circle_id}/members/{member_id}", response_model=MemberResponse)
+async def update_circle_member(
+    circle_id: int,
+    member_id: int,
+    member_in: MemberUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_authenticated_user)
+):
+    """
+    Updates a Yimly member profile: display_name, avatar_color, profile_picture_url,
+    or changes/removes their assigned Home Assistant device.
+    """
+    stmt = select(CircleMember).where(CircleMember.id == member_id, CircleMember.circle_id == circle_id)
+    res = await db.execute(stmt)
+    member = res.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found.")
+
+    if member_in.display_name is not None:
+        member.display_name = member_in.display_name.strip()
+    if member_in.avatar_color is not None:
+        member.avatar_color = member_in.avatar_color
+    if member_in.profile_picture_url is not None:
+        member.profile_picture_url = member_in.profile_picture_url
+    if member_in.assigned_entity_id is not None:
+        clean_entity = member_in.assigned_entity_id.strip()
+        member.assigned_entity_id = clean_entity if clean_entity else None
+
+    # If linked to a user and this user is updating their own member profile, sync user table
+    if member.user_id == user.id:
+        if member_in.display_name:
+            user.display_name = member_in.display_name.strip()
+        if member_in.avatar_color:
+            user.avatar_color = member_in.avatar_color
+        if member_in.assigned_entity_id is not None:
+            user.assigned_entity_id = member.assigned_entity_id
+
+    await db.commit()
+    await db.refresh(member)
+
+    devices_loc: List[MemberDeviceLocation] = []
+    if member.assigned_entity_id and ha_client.is_configured():
+        loc = ha_client.get_entity_location(member.assigned_entity_id)
+        if loc:
+            devices_loc.append(loc)
+
+    return MemberResponse(
+        id=member.id,
+        username=f"member_{member.id}",
+        display_name=member.display_name or "Family Member",
+        avatar_color=member.avatar_color,
+        profile_picture_url=member.profile_picture_url,
+        assigned_entity_id=member.assigned_entity_id,
+        is_owner=False,
+        devices=devices_loc
+    )
+
+@router.delete("/{circle_id}/members/{member_id}")
+async def delete_circle_member(
+    circle_id: int,
+    member_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_authenticated_user)
+):
+    """
+    Deletes a Yimly member from the Circle.
+    """
+    stmt = select(CircleMember).where(CircleMember.id == member_id, CircleMember.circle_id == circle_id)
+    res = await db.execute(stmt)
+    member = res.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found.")
+
+    # Check if this member is circle owner
+    stmt_circle = select(Circle).where(Circle.id == circle_id)
+    res_c = await db.execute(stmt_circle)
+    circle = res_c.scalar_one_or_none()
+    if circle and member.user_id == circle.owner_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete the Circle owner. Delete the Circle instead."
+        )
+
+    await db.delete(member)
+    await db.commit()
+    return {"status": "success", "message": "Member removed from circle."}
+
+@router.get("/devices/available", response_model=List[HADeviceResponse])
+@router.get("/ha/devices", response_model=List[HADeviceResponse])
+async def get_available_ha_devices(
+    user: User = Depends(require_authenticated_user)
+):
+    """
+    Returns discovered location-capable devices from Home Assistant Core via the LLAT connection.
+    Used by the frontend to populate the device assignment dropdown.
+    """
+    if ha_client.is_configured():
+        return ha_client.get_discovered_devices()
+    return []

@@ -27,6 +27,7 @@ export interface MemberDeviceLocation {
   battery?: number | string | null;
   charging?: boolean | null;
   accuracy?: number | null;
+  state?: string;
   last_updated: string;
   platform?: string;
   location_visibility?: "family" | "me_only";
@@ -55,7 +56,24 @@ export interface CircleMember {
   display_name: string;
   avatar_color?: string | null;
   profile_picture_url?: string | null;
+  assigned_entity_id?: string | null;
+  is_owner?: boolean;
   devices: MemberDeviceLocation[];
+}
+
+export interface HADevice {
+  entity_id: string;
+  device_name: string;
+  state: string;
+  is_available: boolean;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracy?: number | null;
+  battery?: number | null;
+  charging?: boolean | null;
+  platform?: string;
+  last_updated?: string;
+  map_icon?: string;
 }
 
 export interface Circle {
