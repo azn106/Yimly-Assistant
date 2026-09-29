@@ -341,6 +341,39 @@ async def api_get_history_period(
     ]
 
 
+@router.get("/api/ha/devices")
+@router.get("/api/devices/available")
+async def api_get_ha_devices(
+    user: User = Depends(require_authenticated_user),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(EntityState).where(
+        EntityState.domain == "device_tracker"
+    )
+    res = await db.execute(stmt)
+    entities = res.scalars().all()
+
+    devices = []
+    for st in entities:
+        attrs = st.attributes if isinstance(st.attributes, dict) else {}
+        devices.append({
+            "entity_id": st.entity_id,
+            "device_name": attrs.get("friendly_name") or st.entity_id,
+            "state": st.state or "unknown",
+            "is_available": True,
+            "latitude": st.latitude,
+            "longitude": st.longitude,
+            "accuracy": attrs.get("gps_accuracy"),
+            "battery": attrs.get("battery") or attrs.get("battery_level") or 100,
+            "charging": attrs.get("charging"),
+            "platform": attrs.get("source_type") or "mobile_app",
+            "last_updated": st.last_updated.isoformat() if hasattr(st.last_updated, "isoformat") else str(st.last_updated) if st.last_updated else None,
+            "map_icon": attrs.get("map_icon") or "📱 Phone"
+        })
+    devices.sort(key=lambda d: d["device_name"].lower())
+    return devices
+
+
 @router.get("/api/devices")
 async def api_get_devices(
     user: User = Depends(require_authenticated_user),

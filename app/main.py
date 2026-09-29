@@ -222,23 +222,6 @@ async def on_startup() -> None:
 
         asyncio.create_task(run_offline_checker())
 
-        # Start official Home Assistant Core integration if configured
-        from app.services.ha_client import ha_client
-        if ha_client.is_configured():
-            logger.info("Starting Home Assistant Core client (LLAT authentication)...")
-            await ha_client.start()
-
-            # Wire HA state changes to notify connected WebSocket sessions
-            from app.services.event_service import EventService
-            def on_ha_state_changed(entity_id: str, old_state: any, new_state: any):
-                if new_state:
-                    EventService.dispatch_event_sync("state_changed", {
-                        "entity_id": entity_id,
-                        "old_state": old_state,
-                        "new_state": new_state
-                    })
-            ha_client.subscribe_state_changes(on_ha_state_changed)
-
     except Exception as e:
         logger.critical(f"Database schema initialization failed: {e}")
         raise e

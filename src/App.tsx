@@ -20,8 +20,6 @@ import { PeopleTab } from "./components/PeopleTab";
 import { PlacesTab } from "./components/PlacesTab";
 import { AlertsTab } from "./components/AlertsTab";
 import { SettingsTab } from "./components/SettingsTab";
-import { PreviewTestState, processPreviewTestMembers } from "./lib/previewTestMode";
-import { PreviewTestModeControls } from "./components/PreviewTestModeControls";
 import { getAvatarColor } from "./lib/avatarColor";
 
 // Re-export external bus helpers for backward compatibility
@@ -45,13 +43,6 @@ export default function App() {
     } catch {
       return null;
     }
-  });
-
-  // Preview Test Mode State (Development & AI Studio Preview Only) - Disabled by default to use real data only
-  const [testState, setTestState] = useState<PreviewTestState>({
-    enabled: false,
-    viewingRole: "owner",
-    defaultDeviceId: "device_tracker.sim_iphone"
   });
 
   // Circles States
@@ -78,12 +69,8 @@ export default function App() {
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null);
   const mapComponentRef = useRef<MapComponentHandle | null>(null);
 
-  // Process members and effective user for Preview Test Mode
-  const { members: displayMembers, effectiveUser: displayUser } = processPreviewTestMembers(
-    circleMembers,
-    user,
-    testState
-  );
+  const displayMembers = circleMembers;
+  const displayUser = user;
 
   // Fetch Places for selected circle
   const fetchPlaces = useCallback(async (circleId: number) => {
@@ -728,8 +715,6 @@ export default function App() {
       {/* AUTHENTICATED SYSTEM FLOW */}
       {status === "authenticated" ? (
         <div className="relative w-full h-full overflow-hidden">
-          {/* PREVIEW TEST MODE CONTROLS (Dev / AI Studio Preview Only) */}
-          <PreviewTestModeControls testState={testState} onChangeTestState={setTestState} />
           
           {/* 1. FULL-SCREEN DOMINANT MAP BACKGROUND */}
           <div className="absolute inset-0 z-0 w-full h-full">
@@ -746,14 +731,7 @@ export default function App() {
               unselectedIconSize={user?.map_unselected_icon_size}
               selectedMemberId={selectedMemberId}
               onSelectMemberId={setSelectedMemberId}
-              onSetDefaultDevice={(memberId, entityId) => {
-                if (testState.enabled) {
-                  setTestState((prev) => ({
-                    ...prev,
-                    defaultDeviceId: entityId
-                  }));
-                }
-              }}
+              onSetDefaultDevice={(memberId, entityId) => {}}
             />
           </div>
 

@@ -2,7 +2,6 @@ import asyncio
 import pytest
 from httpx import AsyncClient, ASGITransport
 from app.main import app
-from app.services.ha_client import ha_client
 
 @pytest.mark.asyncio
 async def test_ha_device_discovery_and_member_assignment():

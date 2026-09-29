@@ -13,7 +13,6 @@ from app.schemas.circles import (
     CircleCreate, CircleJoin, CircleResponse, MemberResponse, MemberDeviceLocation,
     MemberCreate, MemberUpdate, HADeviceResponse
 )
-from app.services.ha_client import ha_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/circles", tags=["Circles"])
@@ -21,6 +20,48 @@ router = APIRouter(prefix="/api/circles", tags=["Circles"])
 def generate_invite_code() -> str:
     # Generates a clean 8-character uppercase alphanumeric code
     return str(uuid.uuid4()).replace("-", "")[:8].upper()
+
+def _entity_state_to_device_location(
+    st: EntityState,
+    is_default: bool = False,
+    now_iso: Optional[str] = None
+) -> Optional[MemberDeviceLocation]:
+    if st.latitude is None or st.longitude is None:
+        return None
+    attrs = st.attributes if isinstance(st.attributes, dict) else {}
+    friendly_name = attrs.get("friendly_name") or st.entity_id
+    battery_val = attrs.get("battery")
+    if battery_val is None:
+        battery_val = attrs.get("battery_level")
+    if battery_val is None:
+        battery_val = attrs.get("battery_bar")
+    accuracy = attrs.get("gps_accuracy")
+    map_icon = attrs.get("map_icon") or "📱 Phone"
+    loc_vis = attrs.get("location_visibility") or "family"
+    is_def = bool(attrs.get("is_default", is_default))
+    if not now_iso:
+        now_iso = datetime.now(timezone.utc).isoformat()
+    last_updated_str = (
+        st.last_updated.isoformat()
+        if hasattr(st.last_updated, "isoformat")
+        else str(st.last_updated)
+        if st.last_updated
+        else now_iso
+    )
+
+    return MemberDeviceLocation(
+        entity_id=st.entity_id,
+        device_name=friendly_name,
+        latitude=st.latitude,
+        longitude=st.longitude,
+        battery=battery_val,
+        charging=attrs.get("charging"),
+        accuracy=accuracy,
+        last_updated=last_updated_str,
+        map_icon=map_icon,
+        location_visibility=loc_vis,
+        is_default=is_def
+    )
 
 @router.post("", response_model=CircleResponse)
 async def create_circle(
@@ -237,16 +278,8 @@ async def list_circle_members(
 
         devices_loc: List[MemberDeviceLocation] = []
 
-        # 1. Official Home Assistant Core telemetry via LLAT
-        if ha_client.is_configured():
-            devices_loc = ha_client.get_member_locations(
-                member_username=username,
-                member_display_name=display_name,
-                assigned_entity_id=assigned_entity_id
-            )
-
-        # 2. Fallback to local EntityState records if HA Core returned no location and linked user exists
-        if not devices_loc and linked_user:
+        # 1. Resolve local EntityState records for linked user
+        if linked_user:
             stmt_states = select(EntityState).where(
                 EntityState.user_id == linked_user.id,
                 EntityState.domain == "device_tracker"
@@ -255,34 +288,28 @@ async def list_circle_members(
             device_trackers = res_states.scalars().all()
 
             for dt in device_trackers:
-                if dt.latitude is not None and dt.longitude is not None:
-                    attrs = dt.attributes if isinstance(dt.attributes, dict) else {}
-                    friendly_name = attrs.get("friendly_name") or dt.entity_id
-                    battery_val = attrs.get("battery")
-                    if battery_val is None:
-                        battery_val = attrs.get("battery_level")
-                    if battery_val is None:
-                        battery_val = attrs.get("battery_bar")
-                    accuracy = attrs.get("gps_accuracy")
-                    map_icon = attrs.get("map_icon") or "📱 Phone"
-                    loc_vis = attrs.get("location_visibility") or "family"
-                    is_def = bool(attrs.get("is_default", False))
-                    
-                    last_updated_str = dt.last_updated.isoformat() if hasattr(dt.last_updated, "isoformat") else str(dt.last_updated) if dt.last_updated else now_iso
+                loc = _entity_state_to_device_location(dt, now_iso=now_iso)
+                if loc:
+                    devices_loc.append(loc)
 
-                    devices_loc.append(MemberDeviceLocation(
-                        entity_id=dt.entity_id,
-                        device_name=friendly_name,
-                        latitude=dt.latitude,
-                        longitude=dt.longitude,
-                        battery=battery_val,
-                        charging=attrs.get("charging"),
-                        accuracy=accuracy,
-                        last_updated=last_updated_str,
-                        map_icon=map_icon,
-                        location_visibility=loc_vis,
-                        is_default=is_def
-                    ))
+        # 2. If an assigned entity ID is specified and not yet in devices_loc, resolve it from local EntityState
+        if assigned_entity_id:
+            already_present = any(d.entity_id == assigned_entity_id for d in devices_loc)
+            if not already_present:
+                stmt_assigned = select(EntityState).where(
+                    EntityState.entity_id == assigned_entity_id,
+                    EntityState.domain == "device_tracker"
+                )
+                res_assigned = await db.execute(stmt_assigned)
+                dt_assigned = res_assigned.scalar_one_or_none()
+                if dt_assigned:
+                    loc = _entity_state_to_device_location(dt_assigned, is_default=True, now_iso=now_iso)
+                    if loc:
+                        devices_loc.append(loc)
+            else:
+                for d in devices_loc:
+                    if d.entity_id == assigned_entity_id:
+                        d.is_default = True
 
         # Sort: default device first
         has_explicit_default = any(d.is_default for d in devices_loc)
@@ -342,12 +369,19 @@ async def create_circle_member(
     await db.commit()
     await db.refresh(new_member)
 
-    # Resolve live device location if assigned
+    # Resolve live device location if assigned from local EntityState
     devices_loc: List[MemberDeviceLocation] = []
-    if new_member.assigned_entity_id and ha_client.is_configured():
-        loc = ha_client.get_entity_location(new_member.assigned_entity_id)
-        if loc:
-            devices_loc.append(loc)
+    if new_member.assigned_entity_id:
+        stmt_dt = select(EntityState).where(
+            EntityState.entity_id == new_member.assigned_entity_id,
+            EntityState.domain == "device_tracker"
+        )
+        res_dt = await db.execute(stmt_dt)
+        dt = res_dt.scalar_one_or_none()
+        if dt:
+            loc = _entity_state_to_device_location(dt, is_default=True)
+            if loc:
+                devices_loc.append(loc)
 
     return MemberResponse(
         id=new_member.id,
@@ -400,11 +434,19 @@ async def update_circle_member(
     await db.commit()
     await db.refresh(member)
 
+    # Resolve live device location if assigned from local EntityState
     devices_loc: List[MemberDeviceLocation] = []
-    if member.assigned_entity_id and ha_client.is_configured():
-        loc = ha_client.get_entity_location(member.assigned_entity_id)
-        if loc:
-            devices_loc.append(loc)
+    if member.assigned_entity_id:
+        stmt_dt = select(EntityState).where(
+            EntityState.entity_id == member.assigned_entity_id,
+            EntityState.domain == "device_tracker"
+        )
+        res_dt = await db.execute(stmt_dt)
+        dt = res_dt.scalar_one_or_none()
+        if dt:
+            loc = _entity_state_to_device_location(dt, is_default=True)
+            if loc:
+                devices_loc.append(loc)
 
     return MemberResponse(
         id=member.id,
@@ -449,13 +491,37 @@ async def delete_circle_member(
 
 @router.get("/devices/available", response_model=List[HADeviceResponse])
 @router.get("/ha/devices", response_model=List[HADeviceResponse])
+@router.get("/ha/discovered-devices", response_model=List[HADeviceResponse])
 async def get_available_ha_devices(
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(require_authenticated_user)
 ):
     """
-    Returns discovered location-capable devices from Home Assistant Core via the LLAT connection.
+    Returns discovered location-capable device_tracker entities from local SQLite.
     Used by the frontend to populate the device assignment dropdown.
     """
-    if ha_client.is_configured():
-        return ha_client.get_discovered_devices()
-    return []
+    stmt = select(EntityState).where(
+        EntityState.domain == "device_tracker"
+    )
+    res = await db.execute(stmt)
+    entities = res.scalars().all()
+
+    devices: List[HADeviceResponse] = []
+    for st in entities:
+        attrs = st.attributes if isinstance(st.attributes, dict) else {}
+        devices.append(HADeviceResponse(
+            entity_id=st.entity_id,
+            device_name=attrs.get("friendly_name") or st.entity_id,
+            state=st.state or "unknown",
+            is_available=True,
+            latitude=st.latitude,
+            longitude=st.longitude,
+            accuracy=attrs.get("gps_accuracy"),
+            battery=attrs.get("battery") or attrs.get("battery_level"),
+            charging=attrs.get("charging"),
+            platform=attrs.get("source_type") or "mobile_app",
+            last_updated=st.last_updated.isoformat() if hasattr(st.last_updated, "isoformat") else str(st.last_updated) if st.last_updated else None,
+            map_icon=attrs.get("map_icon") or "📱 Phone"
+        ))
+    devices.sort(key=lambda d: d.device_name.lower())
+    return devices
